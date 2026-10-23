@@ -1,0 +1,6 @@
+#!/bin/sh
+# Resolves the repository path safely, including spaces, without shell-evaluating input.
+set -eu
+calendar_repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$calendar_repo"
+exec python3 -m calendar_mcp "$@"

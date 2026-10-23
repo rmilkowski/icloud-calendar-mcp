@@ -1,0 +1,76 @@
+# Build products, downloaded tools and local environments
+.build/
+build/
+dist/
+downloads/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+*.app/
+*.dmg
+*.pkg
+*.zip
+*.tar.gz
+*.tar.xz
+*.tgz
+
+# Local runtime state and generated private tunnel profiles
+.state/
+.local-state/
+backups/
+exports/
+
+# Environment files: only deliberately sanitized examples may be committed
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+!*.env.example
+.envrc
+.direnv/
+
+# Credentials/signing material, never source fixtures by default
+*.token
+*.key
+*.pem
+*.p12
+*.pfx
+*.p8
+*.jks
+*.keystore
+*.keychain
+*.keychain-db
+credentials.json
+credentials.yaml
+credentials.yml
+secrets.json
+secrets.yaml
+secrets.yml
+tokens.json
+auth.json
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+
+# Calendar state/audit databases and associated files
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-*
+*.sqlite3-*
+*.db-*
+
+# Logs and transient exports; synthetic .json/.sql/code fixtures stay included
+*.log
+*.log.*
+*.pid
+*.sock
+*.bak
+*.backup
