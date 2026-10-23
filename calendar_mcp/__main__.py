@@ -11,11 +11,13 @@ from .native import NativeBroker, NativeError
 from .protocol import Protocol
 from .security import DEFAULT_STATE, initialize, private_directory
 from .server import GatewayServer
+from . import service
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Private native Calendar MCP transport")
     sub = parser.add_subparsers(dest="command", required=True)
+    service.add_parser(sub)
     for command in ("init", "serve", "stdio", "status"):
         item = sub.add_parser(command)
         item.add_argument("--state-dir", type=Path, default=DEFAULT_STATE)
@@ -27,7 +29,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
-        if args.command == "init":
+        if args.command == "service":
+            return service.dispatch(args)
+        elif args.command == "init":
             initialize(args.state_dir)
             print("Private local credential ready; contents were not displayed.")
         elif args.command == "stdio":

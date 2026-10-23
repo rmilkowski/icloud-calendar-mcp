@@ -37,8 +37,8 @@ class GatewayClient:
         finally:
             connection.close()
 
-    def status(self):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=50)
+    def status(self, timeout=50):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             connection.request("GET", "/status", headers={"Authorization": "Bearer " + self.token,
                                                           "Accept": "application/json"})

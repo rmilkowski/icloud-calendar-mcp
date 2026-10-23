@@ -10,6 +10,7 @@ This is the authoritative installation guide. Use the fresh-install steps on a n
 4. Initialize private state, start the local gateway and verify native authorization with `status`.
 5. Download/verify the current official tunnel client, configure a private tunnel and restricted runtime credential, then start a managed runtime.
 6. Add the tunnel in ChatGPT Plugins and verify a scoped read; separately verify each intended write path and its host confirmation.
+7. Optionally stage and install the per-user login service and independent monitor after the manual setup works.
 
 This integration reads **all calendars exposed by macOS**, including iCloud, other configured accounts, subscribed calendars and read-only calendars. It uses EventKit rather than collecting an iCloud password. Eligibility is checked per write target. It is a personal, single-user service; public ingress and public OAuth are not implemented.
 
@@ -124,7 +125,7 @@ Only literal `127.0.0.1` is bound. MCP uses authenticated POST `/mcp`; GET `/mcp
 
 EventKit IPC uses owned `0700` temporary directories and `0600` request/response/lifetime FIFOs. Only the gateway holds the noninherited lifetime writer. An independent native watchdog stops a broker even if execution/output blocks when the gateway dies. Native PID is diagnostic metadata and is never a signalling authority. No private TCC API or raw-executable production fallback is used.
 
-No gateway login/reboot service is installed. For a manual restart, stop the existing gateway gracefully, rerun the same `serve` command with the same state/port/bundle, then check status. A background installation must be managed separately; avoid duplicate gateways for one native state.
+For a manual restart, stop the existing gateway gracefully, rerun the same `serve` command with the same state/port/bundle, then check status. The optional service below makes login startup and bounded recovery an explicit installation choice; avoid duplicate gateways for one native state.
 
 ## 5. Install the official private tunnel client
 
@@ -152,7 +153,7 @@ Create/reuse a restricted **runtime** credential through the trusted local crede
 )
 ```
 
-Do not overwrite an existing credential unnecessarily. The file is ignored by Git. Source **only this trusted, user-approved file**, with tracing disabled; never `cat` it or print the environment. The managed profile stores `env:CONTROL_PLANE_API_KEY`, not a plaintext key.
+Do not overwrite an existing credential unnecessarily. The file is ignored by Git. The initial manual connection below sources **only this trusted, user-approved file**, with tracing disabled; never `cat` it or print the environment. For compatibility with the optional service's strict loader, keep it to one literal `CONTROL_PLANE_API_KEY=...` assignment; comments and an optional `export` are supported, but shell commands, substitutions and other variables are not. The service never sources or evaluates it. The managed profile stores `env:CONTROL_PLANE_API_KEY`, not a plaintext key.
 
 From the repository, set the actual verified client path and chosen gateway port, then connect the existing private tunnel with supported supervision:
 
@@ -189,6 +190,59 @@ This is appropriate only for the intended trusted personal workspace/tunnel asso
 
 Verify tool discovery and a scoped read first. For a user-authorized disposable write test, review the complete signed preflight and host confirmation, then check the resulting event and journal outcome. Create/modify/delete have separate tools and permission scopes; success of one does not verify the others or guarantee a new prompt on every call.
 
+## Optional login startup, recovery and local alerts
+
+Install this only after the manual gateway and managed tunnel work. It adds two per-user Aqua LaunchAgents: a foreground gateway at GUI login, and an independent monitor at login and every 60 seconds. After reboot, the owning user must unlock FileVault if enabled and log into the Mac's GUI. This is not a pre-login daemon. Keep the settled helper bundle and its existing Calendar grant; registration does not rebuild it.
+
+First stage private configuration and plists without changing the running services. Use absolute paths and the existing private tunnel ID locally. For the fresh-install examples above:
+
+```sh
+./scripts/calendar-mcp service render \
+  --helper "$PWD/build/Calendar MCP Helper.app/Contents/MacOS/CalendarHelper" \
+  --tunnel-client "$PWD/build/tools/tunnel-client/v0.0.17/tunnel-client" \
+  --tunnel-id YOUR_PRIVATE_TUNNEL_ID \
+  --tunnel-env "$PWD/.state/tunnel.env" \
+  --profile-dir "$PWD/.state/tunnel-profiles" \
+  --alias calendar --profile calendar --port 8765
+./scripts/calendar-mcp service status
+```
+
+`render` writes protected `config.json` and `local.calendar-mcp.gateway.plist` / `local.calendar-mcp.monitor.plist` under the selected state directory's `service` directory (`0700`, files `0600`). It does **not** install or start jobs. The default state is `$HOME/Library/Application Support/Private Calendar MCP`; pass the same explicit `--state-dir` to every service command if using another location. `--python` can select an absolute Python interpreter; `--no-notify` disables desktop notification attempts. The credential remains in the approved env file and is passed through the runtime process environment, never stored in a plist, profile, command argument or log.
+
+To activate, first stop the existing manual managed runtime with `runtimes stop <alias>` and gracefully stop the manual gateway. The installer refuses an occupied port, an existing managed runtime or conflicting launchd jobs; it does not take them over or kill their PIDs. Then explicitly install:
+
+```sh
+./scripts/calendar-mcp service install
+./scripts/calendar-mcp service status
+```
+
+Installation registers the jobs in the owning user's GUI launchd domain and starts them. The monitor uses the official client's managed `runtimes status`, `stop` and `connect` operations; it does not launch a second tunnel daemon. After the startup grace, check authenticated gateway/native metadata and the tunnel's separate process-running, healthy and ready state. A healthy tunnel does not verify tool discovery, reads or writes. The monitor does not query Calendar data or request permissions.
+
+`service status` distinguishes staged configuration from installed registration. Its `active` field requires both launchd jobs to be registered; inspect `gateway_registered`, `monitor_registered`, gateway/tunnel health and `last_check` separately. `monitor_stale: true` means no check is recorded within 180 seconds. `restart_attempts_last_hour` reports the persisted per-component rolling budget; registration alone does not prove health.
+
+Recovery waits for a 120-second startup grace and three consecutive failed checks. It uses durable per-component backoff (nominally 60/120/240 seconds, capped at 15 minutes), with at least 120 seconds of grace after each restart; the first three effective delays are 120/120/240 seconds. A component gets at most three restart attempts per hour. Busy native work interrupts the failure streak and is never restarted by the monitor. Repeated five-second gateway HTTP timeouts can trigger owned-gateway recovery after the failure/grace thresholds. Denied/not-determined Calendar permission alerts for local repair; ambiguous status or ownership conflicts require operator inspection, and a gateway dependency failure does not trigger a tunnel restart loop. A restart restores process availability and never replays a submitted Calendar mutation. For an uncertain write, retain its original nonce and follow the journal recovery steps below.
+
+A new boot/login session refreshes startup observations without clearing the rolling restart budget, backoff or existing incidents. The expected initial tunnel connection is logged as startup and consumes a bounded attempt without an outage alert; a failed startup alerts after grace.
+
+By default the monitor attempts deduplicated outage and recovery desktop notifications and records bounded private operational events in `service/monitor.log` (with one rotated `.1` file). Recovery is reported only after 120 seconds of sustained healthy checks. `service/monitor-state.json` persists recovery limits; missing, corrupt or incompatible state suspends recovery and records `service/monitor-error.json` with one notification attempt. Do not delete this state to reset a restart budget. `gateway-launch.log` and `monitor-launch.log` hold private launch diagnostics. These are operational logs, separate from the native execution audit. Notification delivery depends on macOS permissions, Focus and the logged-in GUI session. Local alerts cannot report a powered-off/offline Mac to another device; no email, push service or other external delivery is configured.
+
+To disable startup and recovery, uninstall the jobs:
+
+```sh
+./scripts/calendar-mcp service uninstall
+./scripts/calendar-mcp service status
+```
+
+Uninstall stops the monitor before the service-owned tunnel and gateway and removes registration. It preserves credentials, tunnel profiles, the helper bundle and native journal/audit state. Uninstalling a staged-only configuration must not stop a preexisting manual gateway or runtime. Use the manual commands again if returning to foreground operation; reinstall explicitly to enable login startup again.
+
+Synthetic service validation can run without registration, Calendar access or tunnel connections:
+
+```sh
+python3 -m unittest discover -s Tests -p 'test_service.py' -v
+```
+
+On 24 October 2026 all 33 service tests passed. The full Python suite ran 57 tests: 54 passed and three explicit LaunchServices lifecycle tests were skipped. Existing native synthetic HTTP/stdio tests used the unchanged built helper. The new coverage includes strict credential parsing, metadata-only health, ownership conflicts, fake installation/rollback/uninstall, lifecycle locking, persistent recovery limits, busy/dependency handling, failed-state suspension and notification deduplication. Automated tests perform no real launchd registration. Separate authorized Studio installation/recovery checks are recorded below; an actual reboot/login cycle and visible desktop alert delivery remain unverified.
+
 ## Optional local Codex connection
 
 This connects clients running on the **same Mac** as the gateway, using stdio without copying tokens:
@@ -205,18 +259,25 @@ For synthetic tests add its explicit `--state-dir` to `args`. The documented `wr
 
 ## Current Studio deployment
 
-This dated operational note is separate from fresh installation. On 23 October 2026 the gateway is running in the background on **`127.0.0.1:18765`**, using `$HOME/Library/Application Support/Private Calendar MCP` and protected `gateway.log` there. Port 8765 was occupied and its listener was left untouched. No gateway automatic startup service is installed; do not rebuild the settled authorized app merely to inspect it.
+This dated operational note is separate from fresh installation. On 24 October 2026 the user authorized activating the optional service on the Studio. The gateway and independent monitor are now installed/enabled as the owning user's Aqua LaunchAgents; both jobs are registered. The gateway is reachable on **`127.0.0.1:18765`**, with its resident EventKit broker reporting `full_access`/raw 3, and the managed tunnel is healthy/ready. Private state remains `$HOME/Library/Application Support/Private Calendar MCP`; active launch diagnostics are under its protected `service` directory. Port 8765's existing listener was left untouched. The settled helper bundle was unchanged; do not rebuild it merely to operate the service.
 
-The verified client is `build/tools/tunnel-client/v0.0.17/tunnel-client`, managed alias/profile is `calendar-studio`, and private generated profiles live under `.state/tunnel-profiles`. The runtime credential is referenced through the approved ignored `.state/tunnel.env`; no key values or account/workspace/tunnel IDs belong in this repository. The active stdio command is `scripts/calendar-mcp stdio --port 18765`.
+The verified client is `build/tools/tunnel-client/v0.0.17/tunnel-client`, managed alias/profile is `calendar-studio`, and private generated profiles live under `.state/tunnel-profiles`. The runtime credential is referenced through the approved ignored `.state/tunnel.env`; no key values or account/workspace/tunnel IDs belong in this repository. The service's generated stdio command uses its configured absolute Python interpreter with `-m calendar_mcp stdio --state-dir <configured-state> --port 18765` and the repository as working directory. `scripts/calendar-mcp stdio --port 18765` remains an equivalent manual command with the default state; it is not the exact generated profile command.
+
+For configuration changes, first uninstall the service using the maintenance procedure below, then render with **`--alias calendar-studio --profile calendar-studio --port 18765`**, the existing private tunnel ID, credential file, profile directory and settled helper, and explicitly install again. Do not start a duplicate manual gateway/runtime while monitoring is active.
 
 ```sh
+./scripts/calendar-mcp service status
 ./scripts/calendar-mcp status --port 18765
 ./build/tools/tunnel-client/v0.0.17/tunnel-client runtimes status calendar-studio --json
 ```
 
-To stop the tunnel, use `./build/tools/tunnel-client/v0.0.17/tunnel-client runtimes stop calendar-studio`. For a managed reconnect, repeat the secure environment-loading/connect block above using alias/profile `calendar-studio`, the existing private tunnel ID, the same profile directory, and **`calendar_port=18765`**. Restart the gateway first if needed with `--backend eventkit --port 18765`, the same private state and the settled helper bundle. Never use the returned native PID as a stop instruction.
+For a planned stop or maintenance, run `./scripts/calendar-mcp service uninstall` first; stopping only the tunnel or gateway while monitoring is active is treated as an outage and can trigger recovery. Explicitly `service install` after maintenance to resume. To return to manual operation after uninstall, use the startup/connect blocks above with alias/profile `calendar-studio`, the existing private tunnel ID, the same profile directory/state and **`calendar_port=18765`**. Never use a returned native PID as a stop instruction.
 
-Observed validation: 16 native tests and 24 Python tests passed, including synthetic HTTP/stdio replay, credential rotation and LaunchServices lifecycle/death tests. The production resident broker reported `full_access`/raw 3; a shutdown probe confirmed native exit. Managed tunnel status was healthy/ready, authenticated polling and MCP initialization succeeded. Earlier current-epoch `tools/list` was not observed, so no cached full tool-list observation is claimed; transport counters also included a dispatcher failure rather than universal success.
+Separate controlled stops verified real automatic recovery through natural periodic monitor checks: the owned gateway job restarted once after three failed checks, its old native broker exited through the lifetime mechanism, and the replacement reported full access while the tunnel remained healthy. A later official managed-tunnel stop triggered one reconnect after three failed checks while the gateway stayed healthy. The persistent budgets retained one gateway attempt and two tunnel attempts (initial startup plus controlled recovery), without reset. The gateway remained healthy across subsequent periodic checks. These checks queried only metadata and did not read or mutate Calendar data. The owning GUI session exists, but visible desktop notifications were not observed; an actual reboot/login cycle remains unverified.
+
+The exact deployed stdio command initialized protocol `2025-11-25` and listed the expected nine tools, with zero `tools/call` requests. This verifies the local adapter/gateway protocol path, not refreshed ChatGPT discovery or a new Calendar read. Exactly one matching managed runtime was found. A read-only native journal/audit check retained two applied executions, zero unresolved executions, five audit records and a valid full chain; the settled helper hash was unchanged. No event details or opaque IDs are recorded here.
+
+Historical validation on 23 October 2026: 16 native tests and the then-current 24 Python tests passed, including synthetic HTTP/stdio replay, credential rotation and explicit LaunchServices lifecycle/death tests. The production resident broker reported `full_access`/raw 3; a shutdown probe confirmed native exit. Managed tunnel status was healthy/ready, authenticated polling and MCP initialization succeeded. Earlier current-epoch `tools/list` was not observed, so no cached full tool-list observation is claimed; transport counters also included a dispatcher failure rather than universal success. The 24 October automated test counts and separate real service checks are recorded above; neither required rebuilding the helper.
 
 The user verified an end-to-end real read on ChatGPT iPhone, then a test create and delete. Read-only journal/audit checks found create and delete both `applied`, matching `write_intent` → `write_applied` records, a valid five-record chain and no unresolved executions. Native completion follows EventKit read-back/deletion verification. The user confirmed a ChatGPT prompt before **create**; the delete prompt and complete UI fields were not independently verified. No event details, exact personal times or opaque IDs are recorded here. Real modify and provider/recurrence/timezone edge cases remain unverified. Backend audit does not provide cryptographic proof of fresh human approval.
 
@@ -232,7 +293,9 @@ After an uncertain commit/connection loss, **do not blindly retry or create a re
 
 Protect state, SQLite/associated files, exports and backups as sensitive before/after data (`0700` directories, `0600` files). Gateway/adapter logs omit credentials/request bodies. Keep raw HTTP payload tracing off in the tunnel client. `.gitignore` excludes runtime state, environment/credential files, keys, databases, logs and downloads; that is defense in depth, not a substitute for reviewing staged files before commit.
 
-To rotate the gateway credential, stop the gateway/adapters/tunnel, securely remove or archive only the old protected `gateway.token`, run `init`, and restart with the same native state. The new token's local SHA-256 binding rotates native signing key/key ID/generation while preserving journal history. A running gateway retains its old token until stopped. Revoke/rotate the tunnel credential separately and securely update the approved local env file, then managed-reconnect with its environment reference.
+Before any stopped-state maintenance below—credential rotation, backup/restore, key rotation or reconciliation—run `./scripts/calendar-mcp service uninstall` if the optional service is installed. This preserves its private configuration and native history while preventing the monitor from restarting components during maintenance. Confirm the gateway, broker and managed tunnel have stopped. After maintenance, re-render only if configuration changed, then explicitly `service install` to resume login startup and monitoring. For a manual deployment, stop the tunnel and gateway yourself and restart them after maintenance.
+
+To rotate the gateway credential while stopped, securely remove or archive only the old protected `gateway.token`, run `init`, then resume using the same native state through either service installation or the manual startup commands. The new token's local SHA-256 binding rotates native signing key/key ID/generation while preserving journal history. A running gateway retains its old token until stopped. Revoke/rotate the tunnel credential separately and securely update the approved local env file; service installation or a manual managed reconnect reloads its environment reference.
 
 Retention is indefinite. There is no audit export/purge or automatic backup CLI. Back up the entire protected native state only with the broker fully stopped; never copy/overwrite a live SQLite database or manually delete audit/journal rows. After restoring a stopped backup, invalidate old preview authentication before restarting:
 
@@ -256,4 +319,4 @@ Use `not_applied` only when supported by evidence. A real TTY and typed nonce co
 
 ## Stop and remove
 
-Stop the managed tunnel with `runtimes stop <alias>` and stop the gateway gracefully (Ctrl-C for a foreground process). Remove the plugin/local MCP configuration and revoke the tunnel runtime credential if no longer needed. No gateway startup service is installed by these scripts. Retain or securely dispose of protected state/backups according to audit needs; deleting them loses history and changes installation identity. Revoke the helper's Calendar access in macOS Settings if it should no longer read calendars. Deleting source alone does not revoke OS or tunnel permissions.
+If the optional service is installed, run `./scripts/calendar-mcp service uninstall` first so its monitor cannot restart components during removal. Otherwise stop the managed tunnel with `runtimes stop <alias>` and stop the gateway gracefully (Ctrl-C for a foreground process). Remove the plugin/local MCP configuration and revoke the tunnel runtime credential if no longer needed. Retain or securely dispose of protected state/backups according to audit needs; deleting them loses history and changes installation identity. Revoke the helper's Calendar access in macOS Settings if it should no longer read calendars. Deleting source alone does not revoke OS or tunnel permissions.
