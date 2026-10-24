@@ -14,6 +14,8 @@ This is the authoritative installation guide. Use the fresh-install steps on a n
 
 This integration reads **all calendars exposed by macOS**, including iCloud, other configured accounts, subscribed calendars and read-only calendars. It uses EventKit rather than collecting an iCloud password. Eligibility is checked per write target. It is a personal, single-user service; public ingress and public OAuth are not implemented.
 
+File attachment listing, upload and content fetch are not implemented: the public EventKit API exposes no native file attachment operations. There is no attachment setup step or additional provider credential to configure. See [attachment findings and pending options](attachments.md) for the planned metadata-only listing and separate explicit content fetch; provider access and MCP-only storage remain unselected.
+
 ## 1. Prerequisites and source
 
 Use macOS 14 or later, Swift 6/Xcode Command Line Tools, and Python 3.11 or later with IANA timezone data. Python runtime dependencies are standard library only; no `pip install`, Node.js or model API key is needed. The tunnel has its own runtime credential, separate from the gateway token.
