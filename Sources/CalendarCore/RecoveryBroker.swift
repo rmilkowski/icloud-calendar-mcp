@@ -10,8 +10,8 @@ extension Broker {
     func recoveryDetails(_ details: JSON) -> JSON {
         .object(["url": details["url"], "alarms": details["alarms"].array.map(JSON.array) ?? .array([]), "structured_location": details["structured_location"]])
     }
-    func checkRestorable(_ record: EventRecord) throws {
-        guard !record.recurring, !record.detached else { throw CoreError("unsupported_restore", "Deleting recurring or detached events is unsupported because their original series cannot be faithfully restored") }
+    func checkRestorable(_ record: EventRecord, allowStandaloneOccurrence: Bool = false) throws {
+        guard (!record.recurring && !record.detached) || (allowStandaloneOccurrence && record.occurrence != nil) else { throw CoreError("unsupported_restore", "Deleting recurring or detached events needs the explicit standalone-copy recovery contract") }
         guard !record.hasAttendees, !record.hasOrganizer, record.status != "cancelled", record.details["unsupported_external_alarm"] != .bool(true), record.details["alarms"] == .null || record.details["alarms"].array != nil else { throw CoreError("unsupported_restore", "Stored meeting, alarm or status data cannot be faithfully restored") }
         _ = try record.fields.normalized()
         guard ["free", "busy", "tentative", "unavailable", "unknown"].contains(record.availability) else { throw CoreError("unsupported_restore", "Unsupported event availability") }
@@ -53,7 +53,7 @@ extension Broker {
         else if owner != nil { reason = "already_rolled_back" }
         else if held { reason = "dependent_outcome_unresolved" }
         else if !retained { reason = "details_expired" }
-        else if let payload = try state.execution(row[0])?.payload, marker["action"] == .string("delete"), payload["before"]["recurring"] == .bool(true) || payload["before"]["detached"] == .bool(true) { reason = "recurring_deletion_cannot_be_faithfully_restored" }
+        else if let payload = try state.execution(row[0])?.payload, marker["action"] == .string("delete"), payload["before"]["recurring"] == .bool(true) || payload["before"]["detached"] == .bool(true), !hasStandaloneCopyRecoveryContract(payload) { reason = "recurring_deletion_cannot_be_faithfully_restored" }
         var value: [String: JSON] = ["change_id": .string(row[0]), "created_at": .string(row[4]), "action": marker["action"], "state": .string(row[2]), "event_id": marker["event_id"], "expires_at": .optional(row[5].isEmpty ? nil : row[5]), "details_expired": .bool(!retained), "retention_hold": .bool(held), "rolled_back_by": .optional(owner), "recovery_eligible": .bool(reason == nil), "recovery_reason": .optional(reason)]
         if retained, let payload = try state.execution(row[0])?.payload, let title = payload["before"]["fields"]["title"].string { value["title"] = .string(String(title.unicodeScalars.prefix(300))); value["title_truncated"] = .bool(title.unicodeScalars.count > 300) }
         if marker["rollback_of"].array != nil { value["rollback_of"] = marker["rollback_of"] }
@@ -184,11 +184,14 @@ extension Broker {
         let desired = original["before"], calendar = desired["calendar"]
         guard let currentCalendar = try calendars().first(where: { $0.1["id"] == calendar["id"] }), currentCalendar.1 == calendar else { throw CoreError("stale_calendar", "Original calendar changed or is unavailable") }
         let action: String, before: JSON, restoration: JSON
+        var restoresOccurrenceCopy = false
         if latestExecution.payload["action"] == .string("delete") {
             do { _ = try event(eventID); throw CoreError("stale_event", "Deleted event resolves again; inspect before restoring") }
             catch let error as CoreError where error.code == "event_missing" { }
-            guard desired["recurring"] == .bool(false), desired["detached"] == .bool(false) else { throw CoreError("unsupported_restore", "Recurring and detached deletions cannot be faithfully restored") }
-            let restored = EventRecord(nativeID: "stored", calendarNativeID: currentCalendar.0.nativeID, fields: try EventFields(json: desired["fields"]), recurring: desired["recurring"].boolean ?? true, detached: desired["detached"].boolean ?? true, hasAttendees: desired["has_attendees"].boolean ?? true, hasOrganizer: desired["has_organizer"].boolean ?? true, availability: desired["availability"].string ?? "unsupported", status: desired["status"].string ?? "cancelled", details: desired["details"])
+            restoresOccurrenceCopy = desired["recurring"] == .bool(true) || desired["detached"] == .bool(true)
+            guard !restoresOccurrenceCopy || hasStandaloneCopyRecoveryContract(latestExecution.payload) else { throw CoreError("unsupported_restore", "Historical recurring deletions lack the standalone-copy recovery contract") }
+            // A new standalone intended state; the authoritative source snapshot stays immutable.
+            let restored = EventRecord(nativeID: "stored", calendarNativeID: currentCalendar.0.nativeID, fields: try EventFields(json: desired["fields"]), recurring: false, detached: false, hasAttendees: desired["has_attendees"].boolean ?? true, hasOrganizer: desired["has_organizer"].boolean ?? true, availability: desired["availability"].string ?? "unsupported", status: desired["status"].string ?? "cancelled", details: recoveryDetails(desired["details"]))
             try checkRestorable(restored)
             action = "create"; before = .null
             restoration = .object(["details": recoveryDetails(desired["details"]), "availability": desired["availability"]])
@@ -202,9 +205,10 @@ extension Broker {
         if validateAlarmRestoration { try validateRestorableAlarms(recoveryDetails(desired["details"])["alarms"]) }
         let issued = now(), expiry = try sources.map { try parseDate($0[5]) }.min()!
         guard expiry > issued else { throw CoreError("rollback_ineligible", "A selected source has expired") }
-        var limitations: [JSON] = action == "create" ? [.string("Restoration creates a new provider event. Provider IDs, creation/modification timestamps and read-only status are not restored.")] : []
+        var limitations: [JSON] = action == "create" ? [.string(Self.copyRecoveryLimitation)] : []
+        if restoresOccurrenceCopy { limitations.append(.string(Self.recurringCopyRecoveryLimitation)) }
         if action == "modify" && [desired["recurring"], desired["detached"], before["recurring"], before["detached"]].contains(.bool(true)) {
-            limitations.append(.string("Restores the displayed fields while preserving the current occurrence and series structure. Historical detachment and series membership are not restored."))
+            limitations.append(.string(Self.occurrenceRecoveryLimitation))
         }
         let rollback: JSON = .object(["alarm_restoration": recoveryDetails(desired["details"])["alarms"], "selection_id": .string(selectionID), "source_change_ids": .array(sources.map { .string($0[0]) }), "source_digest": .string(try sourceDigest(sources)), "restoration": restoration, "limitations": .array(limitations)])
         let envelope: JSON = .object(["version": .int(2), "nonce": .string(UUID().uuidString), "issued_at": .string(iso(issued)), "expires_at": .string(iso(min(issued.addingTimeInterval(600), expiry))), "installation_id": .string(try requiredMetadata("installation_id")), "credential_generation": .string(try requiredMetadata("credential_generation")), "key_id": .string(try requiredMetadata("key_id")), "action": .string(action), "scope": .string("this"), "calendar": calendar, "before": before, "after": fields.json, "rollback": rollback])

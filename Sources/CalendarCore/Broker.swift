@@ -43,6 +43,9 @@ public final class Broker: @unchecked Sendable {
     }
     private func perform(_ op: String, arguments: JSON) throws -> JSON {
         switch op {
+        case "recurrence_capabilities":
+            _ = try Arguments(arguments, allowed: [])
+            return .object(["version": .int(1), "recurrence": .bool(true), "preview_version": .int(3), "create_series": .bool(true), "modify_occurrence": .bool(true), "delete_occurrence": .bool(true), "future_scope": .bool(false), "series_modify_delete": .bool(false), "delete_recovery": .string("standalone_copy"), "max_count": .int(1000)])
         case "alerts_capabilities":
             _ = try Arguments(arguments, allowed: [])
             return .object(["version": .int(1), "alerts": .bool(true), "max_alerts": .int(10), "preview_version": .int(2)])
@@ -121,7 +124,8 @@ public final class Broker: @unchecked Sendable {
     private func preflight(_ arguments: JSON) throws -> JSON {
         let a = try Arguments(arguments, allowed: ["action", "scope", "calendar_id", "event_id", "fields"], required: ["action", "scope"])
         let action = try a.string("action")
-        guard ["create", "modify", "delete"].contains(action), try a.string("scope") == "this" else { throw CoreError("unsupported_scope", "Only create/modify/delete with this-occurrence scope is supported") }
+        let scope = try a.string("scope")
+        guard ["create", "modify", "delete"].contains(action), scope == "this" || (action == "create" && scope == "series") else { throw CoreError("unsupported_scope", "Create a series or address one individual event or occurrence") }
         let calendar: JSON; let before: JSON; let after: JSON
         if action == "create" {
             guard a.values["event_id"] == nil, let patch = a.values["fields"] else { throw CoreError("invalid_arguments", "Create requires fields and a calendar, without event_id") }
@@ -129,6 +133,7 @@ public final class Broker: @unchecked Sendable {
             guard let pair = try calendars().first(where: { $0.1["id"].string == id }) else { throw CoreError("calendar_missing", "Unknown calendar") }
             calendar = pair.1; try checkWritable(calendar)
             let fields = try EventFields.merged(patch, with: nil)
+            guard (scope == "series") == (fields.recurrence != nil) else { throw CoreError("unsupported_scope", "Series creation requires recurrence and scope series; individual creation uses scope this") }
             guard fields.timeZone != nil else { throw CoreError("unsupported_timezone", "New events require an explicit timezone") }
             before = .null; after = fields.json
         } else {
@@ -137,7 +142,7 @@ public final class Broker: @unchecked Sendable {
             try checkWritable(calendar, event: record)
             if action == "delete" {
                 guard a.values["fields"] == nil else { throw CoreError("invalid_arguments", "Delete does not accept fields") }
-                try checkRestorable(record)
+                try checkRestorable(record, allowStandaloneOccurrence: true)
                 after = .null
             } else {
                 guard let patch = a.values["fields"] else { throw CoreError("invalid_arguments", "Modify requires fields") }
@@ -153,7 +158,7 @@ public final class Broker: @unchecked Sendable {
         }
         let issued = now()
         let safety = try state.writeSafety(action: action, now: issued)
-        let envelope: JSON = .object(["version": .int(2), "nonce": .string(UUID().uuidString), "issued_at": .string(iso(issued)), "expires_at": .string(iso(issued.addingTimeInterval(600))), "installation_id": .string(try requiredMetadata("installation_id")), "credential_generation": .string(try requiredMetadata("credential_generation")), "key_id": .string(try requiredMetadata("key_id")), "action": .string(action), "scope": .string("this"), "calendar": calendar, "before": before, "after": after])
+        let envelope: JSON = .object(["version": .int(3), "nonce": .string(UUID().uuidString), "issued_at": .string(iso(issued)), "expires_at": .string(iso(issued.addingTimeInterval(600))), "installation_id": .string(try requiredMetadata("installation_id")), "credential_generation": .string(try requiredMetadata("credential_generation")), "key_id": .string(try requiredMetadata("key_id")), "action": .string(action), "scope": .string(scope), "calendar": calendar, "before": before, "after": after, "recovery": recoveryContract(action: action, before: before)])
         guard try envelope.data().count <= 262_144 else { throw CoreError("preview_too_large", "Event review exceeds native preview limit") }
         let tag = HMAC<SHA256>.authenticationCode(for: try envelope.data(), using: try signingKey())
         return .object(["preview": .object(["envelope": envelope, "authentication_tag": .string(Data(tag).base64EncodedString())]), "safety": safety])
@@ -170,16 +175,23 @@ public final class Broker: @unchecked Sendable {
         let envelope = p.values["envelope"]!
         var keys: Set<String> = ["version", "nonce", "issued_at", "expires_at", "installation_id", "credential_generation", "key_id", "action", "scope", "calendar", "before", "after"]
         if rollback { keys.insert("rollback") }
+        if envelope["version"] == .int(3) { keys.insert("recovery") }
         let e = try Arguments(envelope, allowed: keys, required: keys)
-        guard try envelope.data().count <= 262_144, [1, 2].contains(envelope["version"].integer ?? 0),
+        guard try envelope.data().count <= 262_144, (rollback ? [1, 2] : [1, 2, 3]).contains(envelope["version"].integer ?? 0),
               let tag = Data(base64Encoded: try p.string("authentication_tag")), tag.count == 32,
               try e.string("installation_id") == requiredMetadata("installation_id"),
               try e.string("credential_generation") == requiredMetadata("credential_generation"),
               try e.string("key_id") == requiredMetadata("key_id"),
               HMAC<SHA256>.isValidAuthenticationCode(tag, authenticating: try envelope.data(), using: try signingKey()),
-              try e.string("action") == action, try e.string("scope") == "this" else { throw CoreError("invalid_preview", "Preview integrity, binding or action validation failed") }
+              try e.string("action") == action else { throw CoreError("invalid_preview", "Preview integrity, binding or action validation failed") }
+        let version = envelope["version"].integer!, scope = try e.string("scope")
+        guard scope == "this" || (version == 3 && !rollback && action == "create" && scope == "series"),
+              version != 3 || envelope["recovery"] == recoveryContract(action: action, before: envelope["before"]) else { throw CoreError("invalid_preview", "Preview scope or recovery declaration is invalid") }
+        if envelope["after"].object?["recurrence"] != nil {
+            guard version == 3, !rollback, action == "create", scope == "series" else { throw CoreError("invalid_preview", "Recurrence is only supported for version-3 series creation") }
+        } else if scope == "series" { throw CoreError("invalid_preview", "Series creation requires recurrence") }
         if envelope["version"] == .int(1), envelope["after"].object?["alerts"] != nil { throw CoreError("invalid_preview", "Legacy previews cannot contain alert directives") }
-        if envelope["version"] == .int(2), action == "create", !rollback, envelope["after"].object?["alerts"] == nil { throw CoreError("invalid_preview", "Create preview must specify the complete alert list") }
+        if version >= 2, action == "create", !rollback, envelope["after"].object?["alerts"] == nil { throw CoreError("invalid_preview", "Create preview must specify the complete alert list") }
         let nonce = try e.string("nonce")
         guard UUID(uuidString: nonce) != nil else { throw CoreError("invalid_preview", "Invalid nonce") }
         if let prior = try state.execution(nonce) {
@@ -200,11 +212,12 @@ public final class Broker: @unchecked Sendable {
             guard try view(existing!) == envelope["before"] else { throw CoreError("stale_event", "Event changed; request a new preflight") }
         } else { guard envelope["before"] == .null else { throw CoreError("invalid_preview", "Unexpected create before state") } }
         try checkWritable(pair.1, event: existing)
-        if action == "delete", let existing { try checkRestorable(existing) }
+        if action == "delete", let existing { try checkRestorable(existing, allowStandaloneOccurrence: hasStandaloneCopyRecoveryContract(envelope)) }
         let fields = envelope["after"] == .null ? nil : try EventFields(json: envelope["after"])
         guard (action == "delete") == (fields == nil) else { throw CoreError("invalid_preview", "Action and after state disagree") }
         if let fields {
             _ = try fields.dates()
+            if let recurrence = fields.recurrence { guard envelope["after"]["recurrence"] == recurrence.json else { throw CoreError("invalid_preview", "Recurrence intent must be canonical") } }
             if fields.alerts != nil, let existing { try validateRestorableAlarms(recoveryDetails(existing.details)["alarms"]) }
         }
         let auditSequence = try state.claim(nonce: nonce, payload: envelope, now: current)
@@ -225,6 +238,12 @@ public final class Broker: @unchecked Sendable {
                 guard let written, let fields else { throw CoreError("verification_failed", "Write returned no event") }
                 let refreshed = try backend.get(nativeID: written.nativeID, calendarID: written.calendarNativeID, occurrence: written.occurrence, knownStart: parseDate(written.fields.start))
                 guard refreshed.fields.withoutAlerts == fields.withoutAlerts, refreshed.calendarNativeID == pair.0.nativeID else { throw CoreError("verification_failed", "Written event differs from preview") }
+                if let recurrence = fields.recurrence {
+                    guard refreshed.recurring, !refreshed.detached, refreshed.occurrence != nil, recurrence.matches(raw: refreshed.details["recurrence_rules"]) else { throw CoreError("verification_failed", "Created series recurrence differs from preview") }
+                } else if action == "create" {
+                    guard !refreshed.recurring, !refreshed.detached, refreshed.occurrence == nil,
+                          refreshed.details["recurrence_rules"] == .null || refreshed.details["recurrence_rules"] == .array([]) else { throw CoreError("verification_failed", "Unexpected recurrence on individual creation") }
+                }
                 if rollback, let alarms = envelope["rollback"].object?["alarm_restoration"] {
                     guard refreshed.details["alarms"] == alarms else { throw CoreError("verification_failed", "Restored alarms differ from the signed review") }
                 } else if let alerts = fields.alerts {

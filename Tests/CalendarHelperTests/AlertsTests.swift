@@ -113,7 +113,7 @@ final class AlertsTests: XCTestCase {
         let state = try state(), backend = SyntheticBackend(), broker = Broker(state: state, backend: backend)
         let id = commit(broker, create(broker))["result"]["event"]["id"]
         var envelope = draft(broker, fields: ["title": .string("Legacy title")], id: id)["result"]["preview"]["envelope"].object!
-        envelope["version"] = .int(1)
+        envelope["version"] = .int(1); envelope.removeValue(forKey: "recovery")
         let legacy = call(broker, "commit_modify", ["preview": try sign(.object(envelope), state: state)]), legacyNonce = legacy["result"]["nonce"]
         let saved = try state.execution(legacyNonce.string!)!.payload
         let latest = commit(broker, draft(broker, fields: ["alerts": .array([relative(-5), relative(-10)])], id: id), action: "modify")
@@ -156,12 +156,12 @@ final class AlertsTests: XCTestCase {
     func testLegacyV1PreviewReplaySnapshotsAndRollbackRemainCompatible() throws {
         let state = try state(), backend = SyntheticBackend(), broker = Broker(state: state, backend: backend)
         var envelope = create(broker)["result"]["preview"]["envelope"].object!, fields = envelope["after"]!.object!
-        envelope["version"] = .int(1); fields.removeValue(forKey: "alerts"); envelope["after"] = .object(fields)
+        envelope["version"] = .int(1); envelope.removeValue(forKey: "recovery"); fields.removeValue(forKey: "alerts"); envelope["after"] = .object(fields)
         let legacy = try sign(.object(envelope), state: state), created = call(broker, "commit_create", ["preview": legacy])
         XCTAssertEqual(created["result"]["state"], .string("applied")); XCTAssertEqual(call(broker, "commit_create", ["preview": legacy]), created)
         XCTAssertNil(created["result"]["event"]["fields"].object?["alerts"])
         let id = created["result"]["event"]["id"]
-        envelope = draft(broker, fields: ["title": .string("Legacy changed")], id: id)["result"]["preview"]["envelope"].object!; envelope["version"] = .int(1)
+        envelope = draft(broker, fields: ["title": .string("Legacy changed")], id: id)["result"]["preview"]["envelope"].object!; envelope["version"] = .int(1); envelope.removeValue(forKey: "recovery")
         let changed = call(broker, "commit_modify", ["preview": try sign(.object(envelope), state: state)])
         var undoEnvelope = rollback(broker, nonce: changed["result"]["nonce"])["result"]["steps"].array![0]["preview"]["envelope"].object!
         var undoFields = undoEnvelope["rollback"]!.object!; undoFields.removeValue(forKey: "alarm_restoration"); undoEnvelope["rollback"] = .object(undoFields); undoEnvelope["version"] = .int(1)

@@ -154,7 +154,7 @@ class NativeAlertIntegrationTests(unittest.TestCase):
             preview = tool("preflight_change", {"action": "create", "scope": "this", "calendar_id": calendar,
                 "fields": {"title": "Synthetic multi-alert fixture", "start": "2026-10-25T10:00:00Z",
                            "end": "2026-10-25T11:00:00Z", "alerts": initial}})["preview"]
-            self.assertEqual(preview["envelope"]["version"], 2)
+            self.assertEqual(preview["envelope"]["version"], 3 if protocol.recurrence else 2)
             self.assertIn({"at": "2026-10-25T09:45:00.000Z"}, preview["envelope"]["after"]["alerts"])
             altered = deepcopy(preview)
             altered["envelope"]["after"]["alerts"] = []

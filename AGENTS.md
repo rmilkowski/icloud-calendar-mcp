@@ -19,7 +19,7 @@ Read `docs/architecture.md` before system changes. Update it in the same change 
 
 ChatGPT native confirmation is the normal write-consent surface. Do not add Terminal approval prompts, a remote approval API or caller-controlled approval boolean. The native broker owns stateless authenticated previews, identity, stale checks, serialized execution, journal and audit. Commit persists the immutable execution payload and nonce claim before writing; preflight creates no pending approval workflow. Transport cannot choose replacement write payloads.
 
-Deleting a calendar container is permanently prohibited through this integration, including future providers and local tooling. Do not add a calendar-removal operation or a configuration/approval override. Deletion targets one identified event or occurrence through the existing signed-preview flow; individually authorized event deletions and their configured quotas remain supported.
+Deleting a calendar container is permanently prohibited through this integration, including future providers and local tooling. Do not add a calendar-removal operation or a configuration/approval override. Creation may target a new event or an explicitly specified recurring series; modification/deletion targets one identified event or occurrence through the signed-preview flow. Future-occurrence and entire-series modification/deletion remain unsupported. Individually authorized event deletions and their configured quotas remain supported; recurring occurrence deletion must disclose standalone-copy recovery and its structural limitations in the signed preview.
 
 ## Calendar access and validation
 

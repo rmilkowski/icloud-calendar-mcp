@@ -14,6 +14,11 @@ MAX_NATIVE = 4 * 1024 * 1024
 RECOVERY_CAPABILITIES = {"version": 1, "storage_version": 2, "recovery": True,
                          "detail_retention": True, "local_ui": True, "max_selection": 25}
 ALERTS_CAPABILITIES = {"version": 1, "alerts": True, "max_alerts": 10, "preview_version": 2}
+RECURRENCE_CAPABILITIES = {"version": 1, "recurrence": True, "preview_version": 3,
+                           "create_series": True, "modify_occurrence": True,
+                           "delete_occurrence": True, "future_scope": False,
+                           "series_modify_delete": False, "delete_recovery": "standalone_copy",
+                           "max_count": 1000}
 
 
 class NativeError(Exception):
@@ -110,6 +115,20 @@ class NativeBroker:
                     and all(type(result[key]) is type(value) for key, value in ALERTS_CAPABILITIES.items())):
                 self._alerts_capabilities = result
         return self._alerts_capabilities
+
+    def recurrence_capabilities(self):
+        """Probe recurrence independently, without Calendar access or a write."""
+        if not getattr(self, "_recurrence_capabilities_checked", False):
+            self._recurrence_capabilities_checked = True
+            self._recurrence_capabilities = None
+            try:
+                result = self.call("recurrence_capabilities", {})
+            except (NativeError, ValueError, OSError):
+                return None
+            if (isinstance(result, dict) and result == RECURRENCE_CAPABILITIES
+                    and all(type(result[key]) is type(value) for key, value in RECURRENCE_CAPABILITIES.items())):
+                self._recurrence_capabilities = result
+        return self._recurrence_capabilities
 
     def _wait_io(self, readers, writers, deadline):
         while True:

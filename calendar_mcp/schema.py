@@ -101,6 +101,35 @@ ALERT_ROLLBACK_PREVIEW = obj({"envelope": ALERT_ROLLBACK_ENVELOPE,
                              "authentication_tag": string(256, minLength=1)},
                             ("envelope", "authentication_tag"))
 
+RECURRENCE_END = {"oneOf": [obj({"count": {"type": "integer", "minimum": 1, "maximum": 1000}}, ("count",)),
+                             obj({"until": STAMP}, ("until",)), {"type": "null"}]}
+RECURRENCE = obj({"frequency": string(enum=["daily", "weekly", "monthly", "yearly"]),
+                  "interval": {"type": "integer", "minimum": 1, "maximum": 999},
+                  "end": RECURRENCE_END,
+                  "days_of_week": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 7},
+                                   "minItems": 1, "maxItems": 7, "uniqueItems": True,
+                                   "description": "Weekly only. 1 is Sunday and 7 is Saturday."}}, ("frequency",))
+RECURRENCE["description"] = "Recurring creation only, with scope series. interval defaults to 1; omitted or null end is unbounded. Weekly intervals use Monday week boundaries; monthly/yearly rules skip invalid anchor dates."
+CANONICAL_RECURRENCE = {**RECURRENCE, "required": ["frequency", "interval", "end"]}
+OCCURRENCE_RECOVERY_LIMITATION = "Restores the displayed fields while preserving the current occurrence and series structure. Historical detachment and series membership are not restored."
+COPY_RECOVERY_LIMITATION = "Restoration creates a new provider event. Provider IDs, creation/modification timestamps and read-only status are not restored."
+RECURRING_DELETE_LIMITATION = "Recovery recreates only this occurrence as a standalone event with new provider identity. It does not remove the series exclusion, reattach the occurrence, restore series membership, or make future series edits apply to the copy."
+RECOVERY_DISCLOSURE = obj({"mode": string(enum=["not_applicable", "occurrence_fields", "standalone_copy"]),
+                           "limitations": {"type": "array", "maxItems": 2, "uniqueItems": True,
+                                           "items": string(2000, enum=[OCCURRENCE_RECOVERY_LIMITATION,
+                                                                      COPY_RECOVERY_LIMITATION,
+                                                                      RECURRING_DELETE_LIMITATION])}},
+                          ("mode", "limitations"))
+RECURRENCE_FIELDS = {**ALERT_FIELDS, "properties": {**ALERT_FIELDS["properties"], "recurrence": RECURRENCE}}
+RECURRENCE_REVIEW_FIELDS = {**ALERT_REVIEW_FIELDS,
+    "properties": {**ALERT_REVIEW_FIELDS["properties"], "recurrence": CANONICAL_RECURRENCE}}
+RECURRENCE_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
+    "version": {"type": "integer", "enum": [3]}, "scope": string(enum=["this", "series"]),
+    "after": {**RECURRENCE_REVIEW_FIELDS, "type": ["object", "null"]},
+    "recovery": RECOVERY_DISCLOSURE}, "required": [*ENVELOPE["required"], "recovery"]}
+RECURRENCE_PREVIEW = obj({"envelope": RECURRENCE_ENVELOPE,
+                          "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+
 
 def tool(name, description, schema, *, write=False, destructive=False):
     return {"name": name, "description": description, "inputSchema": schema,
@@ -144,8 +173,24 @@ for _tool in TOOLS:
             ROLLBACK_PREVIEW, ALERT_ROLLBACK_PREVIEW] if _tool["name"] == "commit_rollback" else [PREVIEW, ALERT_PREVIEW]}
 
 
-def tools_for_capabilities(*, alerts):
-    return TOOLS if alerts else LEGACY_TOOLS
+RECURRENCE_TOOLS = deepcopy(TOOLS)
+for _tool in RECURRENCE_TOOLS:
+    if _tool["name"] == "preflight_change":
+        _tool["inputSchema"]["properties"]["fields"] = RECURRENCE_FIELDS
+        _tool["inputSchema"]["properties"]["scope"] = string(enum=["this", "series"])
+        _tool["description"] = _tool["description"].replace("Only scope this is supported.",
+            "Create one event with scope this, or a recurring series with scope series and fields.recurrence. Modify/delete address one identified event or occurrence with scope this. Future-occurrence and whole-series modification/deletion are unsupported. Recurring occurrence deletion signs a standalone-copy recovery limitation; recovery cannot reattach it or undo the series exclusion.")
+    elif _tool["name"] in ("commit_create", "commit_modify", "commit_delete"):
+        _tool["inputSchema"]["properties"]["preview"]["oneOf"].append(RECURRENCE_PREVIEW)
+        _tool["description"] = {
+            "commit_create": "Create the event or recurring series specified by the complete native-authenticated preview. Version-3 arguments show the target calendar/source, full event fields, start/end and timezone, scope and canonical recurrence rule for series creation. Native identity, expiry and durable-journal checks apply.",
+            "commit_modify": "Apply the exact field changes in the complete native-authenticated preview to one identified event or occurrence. Version-3 arguments show the calendar/source, full before/after fields, start/end and timezone, scope and recovery limitations. Native identity, stale-state, quota and durable-journal checks apply.",
+            "commit_delete": "Delete the one identified event or occurrence in the complete native-authenticated preview. Version-3 arguments show the calendar/source, full before state, occurrence scope and standalone-copy recovery limitations. A recovered recurring occurrence is independent and leaves the series exclusion intact. Native identity, stale-state, quota and durable-journal checks apply."
+        }[_tool["name"]] + " The preview is the complete execution payload. After an uncertain transport result, get_change_status reads its nonce without retrying the write."
+
+
+def tools_for_capabilities(*, alerts, recurrence=False):
+    return RECURRENCE_TOOLS if recurrence and alerts else TOOLS if alerts else LEGACY_TOOLS
 
 
 class ValidationError(ValueError):
@@ -212,14 +257,20 @@ def validate(value, schema, path="arguments", depth=0):
                 raise ValidationError(path + " requires a recognized IANA time zone") from None
 
 
-def validate_arguments(name, arguments, *, alerts=True):
-    tools = TOOL_MAP if alerts else LEGACY_TOOL_MAP
+def validate_arguments(name, arguments, *, alerts=True, recurrence=False):
+    tools = {item["name"]: item for item in tools_for_capabilities(alerts=alerts, recurrence=recurrence)}
     if name not in tools:
         raise ValidationError("Unknown tool")
     validate(arguments, tools[name]["inputSchema"])
     if name == "preflight_change":
         action = arguments["action"]
         fields = arguments.get("fields")
+        series = arguments["scope"] == "series"
+        rule = fields.get("recurrence") if fields else None
+        if series != (action == "create" and rule is not None) or (rule is not None and action != "create"):
+            raise ValidationError("Only series creation accepts and requires recurrence; modify/delete require scope this")
+        if rule is not None:
+            validate_recurrence(rule)
         if action == "create":
             if "calendar_id" not in arguments or "event_id" in arguments or fields is None or not {"title", "start", "end"} <= fields.keys():
                 raise ValidationError("Create requires calendar_id and title/start/end only")
@@ -238,6 +289,26 @@ def validate_arguments(name, arguments, *, alerts=True):
                 normalized.append(key)
     if name.startswith("commit_") and name != "commit_rollback" and arguments["preview"]["envelope"]["action"] != name.removeprefix("commit_"):
         raise ValidationError("Preview action does not match commit tool")
+    if name in ("commit_create", "commit_modify", "commit_delete") and arguments["preview"]["envelope"]["version"] == 3:
+        envelope = arguments["preview"]["envelope"]
+        action, before, after = envelope["action"], envelope["before"], envelope["after"]
+        create, delete = action == "create", action == "delete"
+        series = envelope["scope"] == "series"
+        rule = after.get("recurrence") if after else None
+        if (before is None) != create or (after is None) != delete:
+            raise ValidationError("Preview before/after must match its action")
+        if series != (create and rule is not None) or (rule is not None and not create):
+            raise ValidationError("Only series creation accepts and requires recurrence")
+        if create and "alerts" not in after:
+            raise ValidationError("Creation preview requires complete alerts")
+        if rule is not None:
+            validate_recurrence(rule)
+        structural = before is not None and (before["recurring"] or before["detached"])
+        expected = ({"mode": "not_applicable", "limitations": []} if create else
+                    {"mode": "occurrence_fields", "limitations": [OCCURRENCE_RECOVERY_LIMITATION] if structural else []} if not delete else
+                    {"mode": "standalone_copy", "limitations": [COPY_RECOVERY_LIMITATION, *([RECURRING_DELETE_LIMITATION] if structural else [])]})
+        if envelope["recovery"] != expected:
+            raise ValidationError("Preview requires the exact action-specific recovery disclosure")
     if name == "commit_rollback":
         envelope = arguments["preview"]["envelope"]
         create = envelope["action"] == "create"
@@ -252,3 +323,8 @@ def validate_arguments(name, arguments, *, alerts=True):
         end = datetime.fromisoformat(arguments["until"].replace("Z", "+00:00"))
         if end <= start:
             raise ValidationError("History until must be after since")
+
+
+def validate_recurrence(rule):
+    if "days_of_week" in rule and rule["frequency"] != "weekly":
+        raise ValidationError("days_of_week is supported only for weekly recurrence")

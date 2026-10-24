@@ -57,6 +57,7 @@ final class EventKitBackend: CalendarBackend {
         } else { e = EKEvent(eventStore: store); e.calendar = c }
         if action == "delete" { try store.remove(e, span: .thisEvent, commit: true); return nil }
         guard let fields else { throw CoreError("invalid_fields", "Missing write fields") }
+        guard existing == nil || fields.recurrence == nil else { throw CoreError("unsupported_scope", "Recurrence changes require unsupported series editing") }
         let (start, end, zone) = try fields.dates()
         if existing == nil || existing?.fields.title != fields.title { e.title = fields.title }
         if existing == nil || existing?.fields.timeZone != fields.timeZone { e.timeZone = zone }
@@ -72,7 +73,23 @@ final class EventKitBackend: CalendarBackend {
                 return EKAlarm(relativeOffset: Double(alert.relativeMinutes!) * 60)
             }
         }
-        try store.save(e, span: .thisEvent, commit: true)
+        if let recurrence = fields.recurrence {
+            let frequency: EKRecurrenceFrequency
+            switch recurrence.frequency { case "daily": frequency = .daily; case "weekly": frequency = .weekly; case "monthly": frequency = .monthly; default: frequency = .yearly }
+            let end: EKRecurrenceEnd?
+            if let count = recurrence.count { end = EKRecurrenceEnd(occurrenceCount: count) }
+            else if let until = recurrence.until { end = EKRecurrenceEnd(end: try parseDate(until)) }
+            else { end = nil }
+            let days = recurrence.daysOfWeek?.map { EKRecurrenceDayOfWeek(EKWeekday(rawValue: $0)!) }
+            e.recurrenceRules = [EKRecurrenceRule(recurrenceWith: frequency, interval: recurrence.interval, daysOfTheWeek: days, daysOfTheMonth: nil, monthsOfTheYear: nil, weeksOfTheYear: nil, daysOfTheYear: nil, setPositions: nil, end: end)]
+        }
+        try store.save(e, span: fields.recurrence == nil ? .thisEvent : .futureEvents, commit: true)
+        if fields.recurrence != nil {
+            guard let first = store.calendarItem(withIdentifier: e.calendarItemIdentifier) as? EKEvent,
+                  first.calendar.calendarIdentifier == calendarID, first.hasRecurrenceRules, !first.isDetached,
+                  first.occurrenceDate != nil else { throw CoreError("verification_failed", "Created series first occurrence is unavailable") }
+            return try record(first)
+        }
         return try record(e) // Identity provenance only; broker re-fetches for verification.
     }
     func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {

@@ -36,9 +36,10 @@ public struct EventFields: Equatable, Sendable {
     public var allDay: Bool
     public var location: String, notes: String
     public var alerts: [EventAlert]?
-    public init(title: String, start: String, end: String, timeZone: String?, allDay: Bool, location: String = "", notes: String = "", alerts: [EventAlert]? = nil) {
+    public var recurrence: EventRecurrence?
+    public init(title: String, start: String, end: String, timeZone: String?, allDay: Bool, location: String = "", notes: String = "", alerts: [EventAlert]? = nil, recurrence: EventRecurrence? = nil) {
         self.title = title; self.start = start; self.end = end; self.timeZone = timeZone
-        self.allDay = allDay; self.location = location; self.notes = notes; self.alerts = alerts
+        self.allDay = allDay; self.location = location; self.notes = notes; self.alerts = alerts; self.recurrence = recurrence
     }
     public var json: JSON {
         var values: [String: JSON] = [
@@ -46,15 +47,17 @@ public struct EventFields: Equatable, Sendable {
         "all_day": .bool(allDay), "location": .string(location), "notes": .string(notes)
         ]
         if let alerts { values["alerts"] = .array(alerts.map(\.json)) }
+        if let recurrence { values["recurrence"] = recurrence.json }
         return .object(values)
     }
-    public var withoutAlerts: EventFields { var copy = self; copy.alerts = nil; return copy }
+    /// Observed fields keep the stable seven-field contract; intents live in details.
+    public var withoutAlerts: EventFields { var copy = self; copy.alerts = nil; copy.recurrence = nil; return copy }
     public init(json: JSON) throws {
-        let a = try Arguments(json, allowed: ["title", "start", "end", "time_zone", "all_day", "location", "notes", "alerts"], required: ["title", "start", "end", "time_zone", "all_day", "location", "notes"])
+        let a = try Arguments(json, allowed: ["title", "start", "end", "time_zone", "all_day", "location", "notes", "alerts", "recurrence"], required: ["title", "start", "end", "time_zone", "all_day", "location", "notes"])
         guard let title = a.values["title"]?.string, let location = a.values["location"]?.string,
               let notes = a.values["notes"]?.string, let allDay = a.values["all_day"]?.boolean,
               a.values["time_zone"] == .null || a.values["time_zone"]?.string != nil else { throw CoreError("invalid_arguments", "Invalid event fields") }
-        self.init(title: title, start: try a.string("start"), end: try a.string("end"), timeZone: a.values["time_zone"]?.string, allDay: allDay, location: location, notes: notes, alerts: try a.values["alerts"].map(EventAlert.parse))
+        self.init(title: title, start: try a.string("start"), end: try a.string("end"), timeZone: a.values["time_zone"]?.string, allDay: allDay, location: location, notes: notes, alerts: try a.values["alerts"].map(EventAlert.parse), recurrence: try a.values["recurrence"].map(EventRecurrence.init(json:)))
     }
     public func dates() throws -> (Date, Date, TimeZone?) {
         let zone = timeZone.flatMap(TimeZone.init(identifier:))
@@ -87,15 +90,17 @@ public struct EventFields: Equatable, Sendable {
         } else if allDay {
             throw CoreError("unsupported_timezone", "Editing all-day events with a nil timezone is unsupported")
         }
+        try recurrence?.validate(start: a, zone: zone)
         return (a, b, zone)
     }
     public func normalized() throws -> EventFields {
         let (a, b, _) = try dates()
-        return EventFields(title: title, start: iso(a), end: iso(b), timeZone: timeZone, allDay: allDay, location: location, notes: notes, alerts: alerts)
+        return EventFields(title: title, start: iso(a), end: iso(b), timeZone: timeZone, allDay: allDay, location: location, notes: notes, alerts: alerts, recurrence: recurrence)
     }
     public static func merged(_ patch: JSON, with existing: EventFields?) throws -> EventFields {
-        let allowed: Set<String> = ["title", "start", "end", "time_zone", "all_day", "location", "notes", "alerts"]
+        let allowed: Set<String> = ["title", "start", "end", "time_zone", "all_day", "location", "notes", "alerts", "recurrence"]
         let a = try Arguments(patch, allowed: allowed)
+        guard existing == nil || a.values["recurrence"] == nil else { throw CoreError("unsupported_scope", "Existing recurrence rules cannot be changed; modify one occurrence's displayed fields") }
         guard !a.values.isEmpty else { throw CoreError("invalid_arguments", "At least one field is required") }
         var values = existing?.json.object ?? ["time_zone": .string("Europe/London"), "all_day": .bool(false), "location": .string(""), "notes": .string(""), "alerts": .array([])]
         values.merge(a.values) { _, new in new }
@@ -194,7 +199,9 @@ public final class SyntheticBackend: CalendarBackend {
         writeCount += 1
         let result: EventRecord?
         if action == "create", let fields {
-            let event = EventRecord(nativeID: UUID().uuidString, calendarNativeID: calendarID, fields: fields.withoutAlerts, details: fields.alerts.map { .object(["alarms": .array($0.map(\.rawAlarm))]) } ?? .object([:])); events.append(event); result = event
+            var details: [String: JSON] = fields.alerts.map { ["alarms": .array($0.map(\.rawAlarm))] } ?? [:]
+            if let recurrence = fields.recurrence { details["recurrence_rules"] = .array([recurrence.rawRule]) }
+            let event = EventRecord(nativeID: UUID().uuidString, calendarNativeID: calendarID, occurrence: fields.recurrence == nil ? nil : fields.start, fields: fields.withoutAlerts, recurring: fields.recurrence != nil, details: .object(details)); events.append(event); result = event
         } else {
             guard let existing, let index = events.firstIndex(where: { $0.nativeID == existing.nativeID && $0.occurrence == existing.occurrence }) else { throw CoreError("event_missing", "Event missing during write") }
             if action == "delete" { events.remove(at: index); result = nil }

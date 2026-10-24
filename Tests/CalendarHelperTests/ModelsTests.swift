@@ -61,7 +61,8 @@ final class ModelsTests: XCTestCase {
     }
     func testLifetimeWatchdogStopsSyntheticBrokerWithStdinStillOpen() throws {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let candidates = [root.appendingPathComponent(".build/out/Products/Debug/CalendarHelper"), root.appendingPathComponent(".build/debug/CalendarHelper")]
+        let override = ProcessInfo.processInfo.environment["CALENDAR_MCP_TEST_HELPER"].map { URL(fileURLWithPath: $0) }
+        let candidates = [override, root.appendingPathComponent(".build/out/Products/Debug/CalendarHelper"), root.appendingPathComponent(".build/debug/CalendarHelper")].compactMap { $0 }
         guard let executable = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else { throw XCTSkip("Build CalendarHelper to exercise subprocess watchdog") }
         let dir = directory()
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

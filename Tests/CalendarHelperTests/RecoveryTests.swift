@@ -203,13 +203,16 @@ final class RecoveryTests: XCTestCase {
         XCTAssertEqual(call(broker, "list_changes", ["limit": .int(100), "cursor": cursor])["result"]["changes"].array?.count, 2)
     }
 
-    func testAllOverTwentyFiveRejectsAndRecurringDeleteCreatesNoIntent() throws {
+    func testAllOverTwentyFiveRejectsAndRecurringDeletePreflightCreatesNoIntent() throws {
         let state = try store(directory()), backend = fixture(26), clock = RecoveryClock(), broker = Broker(state: state, backend: backend, now: { clock.value }), events = ids(broker)
         for id in events { _ = change(broker, id) }
         XCTAssertEqual(call(broker, "preflight_rollback", ["all": .bool(true)])["error"]["code"], .string("selection_too_large"))
         backend.events[0].recurring = true; backend.events[0].occurrence = "2026-10-25T10:00:00.000Z"
         let id = call(broker, "query_events", ["start": .string("2026-10-25T00:00:00Z"), "end": .string("2026-10-26T00:00:00Z")])["result"]["events"].array!.first { $0["recurring"] == .bool(true) }!["id"]
-        XCTAssertEqual(call(broker, "preflight_change", ["action": .string("delete"), "scope": .string("this"), "event_id": id])["error"]["code"], .string("unsupported_restore"))
+        let reviewed = call(broker, "preflight_change", ["action": .string("delete"), "scope": .string("this"), "event_id": id])
+        XCTAssertEqual(reviewed["result"]["preview"]["envelope"]["version"], .int(3))
+        XCTAssertEqual(reviewed["result"]["preview"]["envelope"]["recovery"]["mode"], .string("standalone_copy"))
+        XCTAssertNil(try state.execution(reviewed["result"]["preview"]["envelope"]["nonce"].string!))
         XCTAssertEqual(backend.writeCount, 26)
     }
 
