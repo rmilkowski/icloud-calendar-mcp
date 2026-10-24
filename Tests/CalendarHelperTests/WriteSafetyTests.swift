@@ -233,23 +233,24 @@ final class WriteSafetyTests: XCTestCase {
         for (action, timestamp) in [("invalid", "2026-10-24T12:00:00Z"), ("delete", "invalid")] {
             let dir = directory()
             do { _ = try store(dir) }
+            try sql(dir, "DROP TRIGGER execution_v2_insert") // Simulate an actual pre-v2 journal, before the downgrade fence exists.
             try sql(dir, "INSERT INTO executions VALUES('legacy-fixture','{\"action\":\"\(action)\"}','applied','{}','\(timestamp)')")
             XCTAssertThrowsError(try store(dir))
         }
     }
 
-    func testUpgradeBackfillsOldHelperWritesWithoutResettingExistingLedger() throws {
+    func testRecoveryV2FencesOldHelperWritesWithoutResettingExistingLedger() throws {
         let dir = directory(), clock = SafetyClock()
         do {
             let state = try store(dir), nonce = UUID().uuidString
             _ = try state.claim(nonce: nonce, payload: .object(["action": .string("modify")]), now: clock.value)
             try state.finish(nonce: nonce, state: "applied", result: .object([:]), event: "synthetic_fixture")
         }
-        // A temporary old-binary rollback journals a write but knows nothing about quota.
-        try sql(dir, "INSERT INTO executions VALUES('\(UUID().uuidString)','{\"action\":\"delete\"}','applied','{}','2026-10-24T12:00:00.000Z')")
+        // An old binary cannot insert an intent into upgraded storage.
+        XCTAssertThrowsError(try sql(dir, "INSERT INTO executions VALUES('\(UUID().uuidString)','{\"action\":\"delete\"}','applied','{}','2026-10-24T12:00:00.000Z')"))
         let state = try store(dir), safety = try state.writeSafety(action: "delete", now: clock.value)
-        XCTAssertEqual(safety["usage"]["delete_hour"]["used"], .int(1))
-        XCTAssertEqual(safety["usage"]["destructive_hour"]["used"], .int(2))
+        XCTAssertEqual(safety["usage"]["delete_hour"]["used"], .int(0))
+        XCTAssertEqual(safety["usage"]["destructive_hour"]["used"], .int(1))
         XCTAssertEqual(try state.metadata("write_safety_revision"), "1")
     }
 }

@@ -11,6 +11,8 @@ import time
 from .launch_services import LaunchServicesProcess
 
 MAX_NATIVE = 4 * 1024 * 1024
+RECOVERY_CAPABILITIES = {"version": 1, "storage_version": 2, "recovery": True,
+                         "detail_retention": True, "local_ui": True, "max_selection": 25}
 
 
 class NativeError(Exception):
@@ -79,6 +81,20 @@ class NativeBroker:
         if not valid:
             raise NativeError("invalid_status", "Native authorization/backend status mismatch")
         return result
+
+    def recovery_capabilities(self):
+        """Probe once per resident process; old or unexpected helpers fail closed."""
+        if not getattr(self, "_recovery_capabilities_checked", False):
+            self._recovery_capabilities_checked = True
+            self._recovery_capabilities = None
+            try:
+                result = self.call("recovery_capabilities", {})
+            except (NativeError, ValueError, OSError):
+                return None
+            if (isinstance(result, dict) and result == RECOVERY_CAPABILITIES
+                    and all(type(result[key]) is type(value) for key, value in RECOVERY_CAPABILITIES.items())):
+                self._recovery_capabilities = result
+        return self._recovery_capabilities
 
     def _wait_io(self, readers, writers, deadline):
         while True:

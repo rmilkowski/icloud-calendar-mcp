@@ -1,5 +1,6 @@
 import Foundation
 import EventKit
+import CoreLocation
 import CalendarCore
 
 /// Created lazily only for an explicitly selected live backend. No permission prompt.
@@ -60,6 +61,47 @@ final class EventKitBackend: CalendarBackend {
         if existing == nil || existing?.fields.notes != fields.notes { e.notes = fields.notes }
         try store.save(e, span: .thisEvent, commit: true)
         return try record(e) // Identity provenance only; broker re-fetches for verification.
+    }
+    func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
+        try refresh()
+        guard let c = store.calendar(withIdentifier: calendarID), calendar(c).writable else { throw CoreError("read_only", "Original calendar is no longer writable") }
+        let e = EKEvent(eventStore: store), (start, end, zone) = try fields.dates()
+        e.calendar = c; e.title = fields.title; e.timeZone = zone; e.isAllDay = fields.allDay
+        e.startDate = start; e.endDate = end; e.location = fields.location; e.notes = fields.notes
+        if let value = details["url"].string { guard let url = URL(string: value) else { throw CoreError("unsupported_restore", "Stored event URL is invalid") }; e.url = url }
+        e.structuredLocation = try restoredLocation(details["structured_location"])
+        e.alarms = try (details["alarms"].array ?? []).map { value in
+            let alarm: EKAlarm
+            if let absolute = value["absolute_date"].string { alarm = EKAlarm(absoluteDate: try parseDate(absolute)) }
+            else { guard let offset = value["relative_offset"].string.flatMap(Double.init), offset.isFinite else { throw CoreError("unsupported_restore", "Invalid retained alarm offset") }; alarm = EKAlarm(relativeOffset: offset) }
+            guard let raw = value["proximity"].integer, let proximity = EKAlarmProximity(rawValue: raw) else { throw CoreError("unsupported_restore", "Unsupported alarm proximity") }
+            alarm.proximity = proximity; alarm.structuredLocation = try restoredLocation(value["structured_location"])
+            guard let type = value["type"].integer, let alarmType = EKAlarmType(rawValue: type), alarmType == .display || alarmType == .audio else { throw CoreError("unsupported_restore", "Only display and audio alarms can be restored") }
+            alarm.soundName = value["sound_name"].string
+            return alarm
+        }
+        switch availability {
+        case "free": e.availability = .free
+        case "busy": e.availability = .busy
+        case "tentative": e.availability = .tentative
+        case "unavailable": e.availability = .unavailable
+        case "unknown": e.availability = .notSupported
+        default: throw CoreError("unsupported_restore", "Unsupported retained availability")
+        }
+        try store.save(e, span: .thisEvent, commit: true)
+        return try record(e)
+    }
+    private func restoredLocation(_ value: JSON) throws -> EKStructuredLocation? {
+        if value == .null { return nil }
+        guard value.object != nil, let radius = value["radius"].string.flatMap(Double.init), radius.isFinite, radius >= 0 else { throw CoreError("unsupported_restore", "Invalid retained structured location") }
+        let location = EKStructuredLocation(title: value["title"].string ?? "")
+        location.title = value["title"].string
+        location.radius = radius
+        if value["latitude"] != .null || value["longitude"] != .null {
+            guard let latitude = value["latitude"].string.flatMap(Double.init), let longitude = value["longitude"].string.flatMap(Double.init), latitude.isFinite, longitude.isFinite, (-90...90).contains(latitude), (-180...180).contains(longitude) else { throw CoreError("unsupported_restore", "Invalid retained geographic location") }
+            location.geoLocation = CLLocation(latitude: latitude, longitude: longitude)
+        }
+        return location
     }
     private func location(_ l: EKStructuredLocation?) -> JSON {
         guard let l else { return .null }

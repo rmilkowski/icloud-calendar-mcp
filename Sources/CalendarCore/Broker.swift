@@ -5,9 +5,9 @@ import CryptoKit
 /// The state directory lock additionally excludes a second resident process.
 public final class Broker: @unchecked Sendable {
     public let state: StateStore
-    private let backend: any CalendarBackend
-    private let now: () -> Date
-    private let lock = NSLock()
+    let backend: any CalendarBackend
+    let now: () -> Date
+    let lock = NSLock()
     public init(state: StateStore, backend: any CalendarBackend, now: @escaping () -> Date = Date.init) {
         self.state = state; self.backend = backend; self.now = now
     }
@@ -15,6 +15,7 @@ public final class Broker: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         do {
             let r = try Arguments(request, allowed: ["op", "arguments"], required: ["op", "arguments"])
+            try state.expireRecoveryDetails(now: now())
             return .object(["result": try perform(try r.string("op"), arguments: r.values["arguments"]!)])
         } catch {
             var failure = error as? CoreError ?? CoreError("native_error", "Native operation failed safely")
@@ -25,23 +26,32 @@ public final class Broker: @unchecked Sendable {
             return .object(["error": .object(["code": .string(failure.code), "message": .string(failure.message)])])
         }
     }
-    private func calendars() throws -> [(CalendarRecord, JSON)] {
+    func calendars() throws -> [(CalendarRecord, JSON)] {
         try backend.calendars().map { record in
             let id = try state.identity(kind: "calendar", nativeID: record.nativeID)
             return (record, record.view(id: id))
         }.sorted { ($0.1["id"].string ?? "") < ($1.1["id"].string ?? "") }
     }
-    private func view(_ record: EventRecord, knownCalendar: JSON? = nil) throws -> JSON {
+    func view(_ record: EventRecord, knownCalendar: JSON? = nil) throws -> JSON {
         guard let calendar = try knownCalendar ?? calendars().first(where: { $0.0.nativeID == record.calendarNativeID })?.1 else { throw CoreError("calendar_missing", "Event calendar is unavailable") }
         let id = try state.identity(kind: "event", nativeID: record.nativeID, calendarID: record.calendarNativeID, occurrence: record.occurrence, knownStart: record.fields.start)
         return try record.view(id: id, calendar: calendar)
     }
-    private func event(_ id: String) throws -> EventRecord {
+    func event(_ id: String) throws -> EventRecord {
         let ref = try state.resolve(id, kind: "event")
         return try backend.get(nativeID: ref.nativeID, calendarID: ref.calendarID, occurrence: ref.occurrence, knownStart: parseDate(ref.knownStart))
     }
     private func perform(_ op: String, arguments: JSON) throws -> JSON {
         switch op {
+        case "recovery_capabilities":
+            _ = try Arguments(arguments, allowed: [])
+            return .object(["version": .int(1), "storage_version": .int(2), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(true), "max_selection": .int(25)])
+        case "list_changes": return try listChanges(arguments)
+        case "get_stored_change": return try storedChange(arguments)
+        case "preflight_rollback": return try preflightRollback(arguments)
+        case "commit_rollback":
+            guard let action = arguments["preview"]["envelope"]["action"].string, ["create", "modify"].contains(action) else { throw CoreError("invalid_preview", "Invalid rollback action") }
+            return try commit(arguments, action: action, rollback: true)
         case "list_calendars":
             _ = try Arguments(arguments, allowed: [])
             return .object(["calendars": .array(try calendars().map(\.1))])
@@ -94,7 +104,7 @@ public final class Broker: @unchecked Sendable {
         result["policy"] = .string("Exclude cancelled and free; count busy, tentative, unavailable and unknown. Snapshot only; no reservation.")
         return .object(result)
     }
-    private func checkWritable(_ calendar: JSON, event: EventRecord? = nil) throws {
+    func checkWritable(_ calendar: JSON, event: EventRecord? = nil) throws {
         guard calendar["writable"].boolean == true, calendar["subscribed"].boolean == false else { throw CoreError("read_only", "Calendar is read-only or subscribed") }
         if let event {
             guard !event.hasAttendees, !event.hasOrganizer else { throw CoreError("unsupported_meeting", "Meeting/invitation mutations are unsupported") }
@@ -123,7 +133,9 @@ public final class Broker: @unchecked Sendable {
             let record = try event(a.string("event_id")); before = try view(record); calendar = before["calendar"]
             try checkWritable(calendar, event: record)
             if action == "delete" {
-                guard a.values["fields"] == nil else { throw CoreError("invalid_arguments", "Delete does not accept fields") }; after = .null
+                guard a.values["fields"] == nil else { throw CoreError("invalid_arguments", "Delete does not accept fields") }
+                try checkRestorable(record)
+                after = .null
             } else {
                 guard let patch = a.values["fields"] else { throw CoreError("invalid_arguments", "Modify requires fields") }
                 after = try EventFields.merged(patch, with: record.fields).json
@@ -140,17 +152,18 @@ public final class Broker: @unchecked Sendable {
         let tag = HMAC<SHA256>.authenticationCode(for: try envelope.data(), using: try signingKey())
         return .object(["preview": .object(["envelope": envelope, "authentication_tag": .string(Data(tag).base64EncodedString())]), "safety": safety])
     }
-    private func requiredMetadata(_ key: String) throws -> String {
+    func requiredMetadata(_ key: String) throws -> String {
         guard let value = try state.metadata(key) else { throw CoreError("state_corrupt", "Native identity configuration missing") }; return value
     }
-    private func signingKey() throws -> SymmetricKey {
+    func signingKey() throws -> SymmetricKey {
         guard let data = Data(base64Encoded: try requiredMetadata("signing_key")), data.count == 32 else { throw CoreError("state_corrupt", "Native signing configuration invalid") }; return SymmetricKey(data: data)
     }
-    private func commit(_ arguments: JSON, action: String) throws -> JSON {
+    func commit(_ arguments: JSON, action: String, rollback: Bool = false) throws -> JSON {
         let a = try Arguments(arguments, allowed: ["preview"], required: ["preview"])
         let p = try Arguments(a.values["preview"]!, allowed: ["envelope", "authentication_tag"], required: ["envelope", "authentication_tag"])
         let envelope = p.values["envelope"]!
-        let keys: Set<String> = ["version", "nonce", "issued_at", "expires_at", "installation_id", "credential_generation", "key_id", "action", "scope", "calendar", "before", "after"]
+        var keys: Set<String> = ["version", "nonce", "issued_at", "expires_at", "installation_id", "credential_generation", "key_id", "action", "scope", "calendar", "before", "after"]
+        if rollback { keys.insert("rollback") }
         let e = try Arguments(envelope, allowed: keys, required: keys)
         guard try envelope.data().count <= 262_144, envelope["version"].integer == 1,
               let tag = Data(base64Encoded: try p.string("authentication_tag")), tag.count == 32,
@@ -162,13 +175,14 @@ public final class Broker: @unchecked Sendable {
         let nonce = try e.string("nonce")
         guard UUID(uuidString: nonce) != nil else { throw CoreError("invalid_preview", "Invalid nonce") }
         if let prior = try state.execution(nonce) {
-            guard prior.payload == envelope else { throw CoreError("nonce_conflict", "Nonce payload differs from recorded execution") }
+            guard try state.payloadMatches(nonce: nonce, payload: envelope) else { throw CoreError("nonce_conflict", "Nonce payload differs from recorded execution") }
             try state.append(event: "commit_replayed", nonce: nonce, payload: prior.result)
             return prior.result
         }
         let issued = try parseDate(e.string("issued_at")), expiry = try parseDate(e.string("expires_at")), current = now()
         guard issued <= current.addingTimeInterval(30), expiry > current, expiry > issued, expiry.timeIntervalSince(issued) <= 600.001 else { throw CoreError("preview_expired", "Preview expired or invalid; request a new preflight") }
         guard try !state.hasUnresolved() else { throw CoreError("unresolved_write", "An earlier write is unresolved; inspect and reconcile before any new write") }
+        if rollback { try validateRollback(envelope) }
         let calendarID = try Arguments(envelope["calendar"], allowed: ["id", "title", "source", "writable", "subscribed"], required: ["id", "title", "source", "writable", "subscribed"]).string("id")
         guard let pair = try calendars().first(where: { $0.1["id"].string == calendarID }), pair.1 == envelope["calendar"] else { throw CoreError("stale_calendar", "Calendar changed; request a new preflight") }
         var existing: EventRecord?
@@ -178,13 +192,17 @@ public final class Broker: @unchecked Sendable {
             guard try view(existing!) == envelope["before"] else { throw CoreError("stale_event", "Event changed; request a new preflight") }
         } else { guard envelope["before"] == .null else { throw CoreError("invalid_preview", "Unexpected create before state") } }
         try checkWritable(pair.1, event: existing)
+        if action == "delete", let existing { try checkRestorable(existing) }
         let fields = envelope["after"] == .null ? nil : try EventFields(json: envelope["after"])
         guard (action == "delete") == (fields == nil) else { throw CoreError("invalid_preview", "Action and after state disagree") }
         if let fields { _ = try fields.dates() }
         let auditSequence = try state.claim(nonce: nonce, payload: envelope, now: current)
         let result: JSON
         do {
-            let written = try backend.apply(action: action, calendarID: pair.0.nativeID, existing: existing, fields: fields)
+            let written: EventRecord?
+            if rollback && action == "create", let fields {
+                written = try backend.restore(calendarID: pair.0.nativeID, fields: fields, details: envelope["rollback"]["restoration"]["details"], availability: envelope["rollback"]["restoration"]["availability"].string!)
+            } else { written = try backend.apply(action: action, calendarID: pair.0.nativeID, existing: existing, fields: fields) }
             if action == "delete" {
                 guard let existing else { throw CoreError("verification_failed", "Missing delete identity") }
                 do { _ = try backend.get(nativeID: existing.nativeID, calendarID: existing.calendarNativeID, occurrence: existing.occurrence, knownStart: parseDate(existing.fields.start)); throw CoreError("verification_failed", "Deleted event still resolves") }
@@ -201,7 +219,16 @@ public final class Broker: @unchecked Sendable {
                     guard existing.recurring || existing.detached || refreshed.details["recurrence_rules"] == existing.details["recurrence_rules"] else { throw CoreError("verification_failed", "Unexpected recurrence change") }
                     try state.rebindEvent(id: envelope["before"]["id"].string!, to: refreshed)
                 }
-                result = .object(["nonce": .string(nonce), "state": .string("applied"), "action": .string(action), "event": try view(refreshed), "audit_sequence": .int(auditSequence)])
+                if rollback {
+                    let sources = envelope["rollback"]["source_change_ids"]
+                    let source = try state.execution(sources.array!.first!.string!)!.payload
+                    let originalID = source["before"]["id"].string!
+                    if action == "create" {
+                        guard recoveryDetails(refreshed.details) == envelope["rollback"]["restoration"]["details"], refreshed.availability == envelope["rollback"]["restoration"]["availability"].string else { throw CoreError("verification_failed", "Restored event details differ from the signed review") }
+                        try state.rebindEvent(id: originalID, to: refreshed)
+                    }
+                    result = .object(["nonce": .string(nonce), "state": .string("applied"), "action": .string(action), "event": try view(refreshed), "event_id": .string(originalID), "rollback_of": sources, "audit_sequence": .int(auditSequence)])
+                } else { result = .object(["nonce": .string(nonce), "state": .string("applied"), "action": .string(action), "event": try view(refreshed), "audit_sequence": .int(auditSequence)]) }
             }
         } catch {
             let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string(action), "audit_sequence": .int(auditSequence), "message": .string("Write may have happened; do not retry or create another change until reconciled")])

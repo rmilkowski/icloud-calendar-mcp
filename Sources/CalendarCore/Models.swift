@@ -135,8 +135,15 @@ public protocol CalendarBackend: AnyObject {
     func calendars() throws -> [CalendarRecord]
     func query(start: Date, end: Date, calendarIDs: [String]) throws -> [EventRecord]
     func get(nativeID: String, calendarID: String, occurrence: String?, knownStart: Date) throws -> EventRecord
+    func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord
     /// Any error after entering this method is conservatively an unknown outcome.
     func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord?
+}
+
+public extension CalendarBackend {
+    func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
+        throw CoreError("unsupported_restore", "Backend cannot restore retained event details")
+    }
 }
 
 public final class SyntheticBackend: CalendarBackend {
@@ -159,6 +166,13 @@ public final class SyntheticBackend: CalendarBackend {
         let matches = events.filter { $0.nativeID == nativeID && $0.calendarNativeID == calendarID && $0.occurrence == occurrence }
         guard !matches.isEmpty else { throw CoreError("event_missing", "Event identity is missing; query again") }
         guard matches.count == 1 else { throw CoreError("identity_ambiguous", "Event identity is ambiguous; query again") }; return matches[0]
+    }
+    public func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
+        writeCount += 1
+        let event = EventRecord(nativeID: UUID().uuidString, calendarNativeID: calendarID, fields: fields, availability: availability, details: details)
+        events.append(event)
+        if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-write failure") }
+        return event
     }
     public func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord? {
         writeCount += 1

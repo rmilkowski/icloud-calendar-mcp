@@ -51,12 +51,31 @@ PREVIEW = obj({"envelope": ENVELOPE, "authentication_tag": string(256, minLength
 RANGE = obj({"start": STAMP, "end": STAMP,
              "calendar_ids": {"type": "array", "items": IDENTITY, "minItems": 1, "maxItems": 100},
              "time_zone": string(100, format="time-zone")}, ("start", "end"))
+CHANGE_FILTERS = {"since": STAMP, "until": STAMP,
+                  "action": string(enum=["modify", "delete"]), "event_id": IDENTITY}
+CHANGE_IDS = {"type": "array", "items": IDENTITY, "minItems": 1, "maxItems": 25,
+              "uniqueItems": True}
+ROLLBACK_RESTORATION = obj({"details": {"type": "object", "properties": {}, "required": [],
+                                       "additionalProperties": True},
+                            "availability": string(40)}, ("details", "availability"))
+ROLLBACK = obj({"selection_id": IDENTITY, "source_change_ids": CHANGE_IDS,
+                "source_digest": string(64, minLength=64),
+                "restoration": {**ROLLBACK_RESTORATION, "type": ["object", "null"]},
+                "limitations": {"type": "array", "items": string(2000), "maxItems": 20}},
+               ("selection_id", "source_change_ids", "source_digest", "restoration", "limitations"))
+ROLLBACK_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
+                     "action": string(enum=["create", "modify"]),
+                     "after": FULL_FIELDS, "rollback": ROLLBACK},
+                     "required": [*ENVELOPE["required"], "rollback"]}
+ROLLBACK_PREVIEW = obj({"envelope": ROLLBACK_ENVELOPE,
+                        "authentication_tag": string(256, minLength=1)},
+                       ("envelope", "authentication_tag"))
 
 
 def tool(name, description, schema, *, write=False, destructive=False):
     return {"name": name, "description": description, "inputSchema": schema,
             "annotations": {"readOnlyHint": not write, "destructiveHint": destructive,
-                            "idempotentHint": name != "preflight_change", "openWorldHint": False}}
+                            "idempotentHint": not name.startswith("preflight_"), "openWorldHint": False}}
 
 
 TOOLS = [
@@ -71,8 +90,19 @@ TOOLS = [
            obj({"preview": PREVIEW}, ("preview",)), write=True, destructive=action != "create")
       for action in ("create", "modify", "delete")],
     tool("get_change_status", "Read durable journal outcome by preview nonce. Does not retry a mutation.", obj({"nonce": IDENTITY}, ("nonce",))),
+    tool("list_changes", "Browse this integration's retained modify/delete history. Default detail retention is five days, locally configurable. Follow next_cursor until null to freeze the complete newest-first matching ID inventory; pages are bounded and are not an all-history selection. For more than 25 sources, review explicit batches of at most 25 newest-first IDs and finish each batch before preparing the next. Expired metadata can be requested explicitly. Unknown outcomes can be inspected but cannot be rolled back automatically.",
+         obj({**CHANGE_FILTERS, "include_expired": {"type": "boolean"},
+              "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+              "cursor": string(4096, minLength=1)})),
+    tool("get_stored_change", "Read one integration change's retained complete before/after details and rollback eligibility. Expired details cannot be restored; this does not retry or reconcile a write.",
+         obj({"change_id": IDENTITY}, ("change_id",))),
+    tool("preflight_rollback", "Prepare exact authenticated recovery steps for selected retained changes, or all matching changes. Use either unique change_ids (maximum 25) alone or all:true with optional filters. All fails if the complete selection exceeds limits; it never silently truncates. For larger jobs first collect every list_changes cursor page, freeze the complete newest-first matching ID inventory, and prepare explicit batches of at most 25 sources, completing each batch before preparing the next. Blocked entries must be shown for the user to choose a supported subset. Related edits are grouped. Review all steps, then commit each unchanged preview through commit_rollback in returned order; stop on any failure or unknown outcome. Recovery is not atomic and cannot restore native IDs or provider provenance. No pending approval is created.",
+         obj({"change_ids": CHANGE_IDS, "all": {"type": "boolean"}, **CHANGE_FILTERS})),
+    tool("commit_rollback", "Execute one complete native-authenticated recovery step shown in these arguments under the host's approval policy. Pass the exact preview from preflight_rollback unchanged. This is a new journalled create or modify, with current stale checks and write-safety policy. A sequence is not atomic: stop after any failure or unknown outcome, inspect its nonce with get_change_status, and refresh remaining recovery previews. Never substitute target or restoration fields.",
+         obj({"preview": ROLLBACK_PREVIEW}, ("preview",)), write=True, destructive=True),
 ]
 TOOL_MAP = {t["name"]: t for t in TOOLS}
+RECOVERY_TOOLS = frozenset(("list_changes", "get_stored_change", "preflight_rollback", "commit_rollback"))
 
 
 class ValidationError(ValueError):
@@ -106,6 +136,11 @@ def validate(value, schema, path="arguments", depth=0):
             raise ValidationError(path + " has invalid item count")
         for item in value:
             validate(item, schema["items"], path + "[]", depth + 1)
+        if schema.get("uniqueItems") and any(item in value[:index] for index, item in enumerate(value)):
+            raise ValidationError(path + " requires unique items")
+    elif actual in ("integer", "number"):
+        if value < schema.get("minimum", value) or value > schema.get("maximum", value):
+            raise ValidationError(path + " is outside the permitted range")
     elif actual == "string":
         if not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", 10000):
             raise ValidationError(path + " has invalid text length")
@@ -135,5 +170,19 @@ def validate_arguments(name, arguments):
                 raise ValidationError("Create requires calendar_id and title/start/end only")
         elif "event_id" not in arguments or "calendar_id" in arguments or (action == "delete" and fields is not None) or (action == "modify" and not fields):
             raise ValidationError("Modify/delete require event_id and action-appropriate fields")
-    if name.startswith("commit_") and arguments["preview"]["envelope"]["action"] != name.removeprefix("commit_"):
+    if name.startswith("commit_") and name != "commit_rollback" and arguments["preview"]["envelope"]["action"] != name.removeprefix("commit_"):
         raise ValidationError("Preview action does not match commit tool")
+    if name == "commit_rollback":
+        envelope = arguments["preview"]["envelope"]
+        create = envelope["action"] == "create"
+        if (envelope["before"] is None) != create or (envelope["rollback"]["restoration"] is not None) != create:
+            raise ValidationError("Rollback before/restoration must match the native recovery action")
+    if name == "preflight_rollback":
+        selected = "change_ids" in arguments
+        if (selected and set(arguments) != {"change_ids"}) or (not selected and arguments.get("all") is not True):
+            raise ValidationError("Rollback requires change_ids alone or all:true with optional filters")
+    if name in ("list_changes", "preflight_rollback") and "since" in arguments and "until" in arguments:
+        start = datetime.fromisoformat(arguments["since"].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(arguments["until"].replace("Z", "+00:00"))
+        if end <= start:
+            raise ValidationError("History until must be after since")

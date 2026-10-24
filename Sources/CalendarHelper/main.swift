@@ -1,5 +1,6 @@
 import Foundation
 import EventKit
+import AppKit
 import CalendarCore
 import Darwin
 
@@ -28,6 +29,33 @@ func runtimeStatus(_ mode: String) throws -> JSON {
         return (name, status.rawValue)
     }
 }
+
+func runNativeInput(broker: Broker, mode: String) throws {
+        var buffer = Data()
+        var bytes = [UInt8](repeating: 0, count: 16_384)
+        while true {
+            // Foundation read(upToCount:) can wait for a full pipe buffer. The POSIX
+            // read returns available bytes, which keeps resident NDJSON interactive.
+            let count = Darwin.read(STDIN_FILENO, &bytes, 16_384)
+            if count < 0 { if errno == EINTR { continue }; throw CoreError("input_failed", "Native input read failed") }
+            if count == 0 { if !buffer.isEmpty { output(errorJSON(CoreError("invalid_arguments", "Native requests must end with newline"))) }; break }
+            buffer.append(contentsOf: bytes.prefix(count))
+            while let newline = buffer.firstIndex(of: 10) {
+                let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
+                do {
+                    let request = try JSON.parse(line)
+                    if request["op"].string == "authorization_status" {
+                        let envelope = try Arguments(request, allowed: ["op", "arguments"], required: ["op", "arguments"])
+                        _ = try Arguments(envelope.values["arguments"]!, allowed: [])
+                        output(.object(["result": try runtimeStatus(mode)]))
+                    } else { output(broker.handle(request)) }
+                } catch { output(errorJSON(error)) }
+            }
+            if buffer.count > 524_288 { output(errorJSON(CoreError("request_too_large", "Native request exceeds 512 KiB"))); exit(1) }
+
+        }
+}
+@MainActor func runNativeApplication() { NSApplication.shared.run() }
 
 let args = Array(CommandLine.arguments.dropFirst())
 do {
@@ -67,28 +95,22 @@ do {
         try state.configure(backendMode: mode, credentialBinding: binding)
         let backend: any CalendarBackend = mode == "synthetic" ? SyntheticBackend() : EventKitBackend()
         let broker = Broker(state: state, backend: backend)
-        var buffer = Data()
-        var bytes = [UInt8](repeating: 0, count: 16_384)
-        while true {
-            // Foundation read(upToCount:) can wait for a full pipe buffer. The POSIX
-            // read returns available bytes, which keeps resident NDJSON interactive.
-            let count = Darwin.read(STDIN_FILENO, &bytes, 16_384)
-            if count < 0 { if errno == EINTR { continue }; throw CoreError("input_failed", "Native input read failed") }
-            if count == 0 { if !buffer.isEmpty { output(errorJSON(CoreError("invalid_arguments", "Native requests must end with newline"))) }; break }
-            buffer.append(contentsOf: bytes.prefix(count))
-            while let newline = buffer.firstIndex(of: 10) {
-                let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
-                do {
-                    let request = try JSON.parse(line)
-                    if request["op"].string == "authorization_status" {
-                        let envelope = try Arguments(request, allowed: ["op", "arguments"], required: ["op", "arguments"])
-                        _ = try Arguments(envelope.values["arguments"]!, allowed: [])
-                        output(.object(["result": try runtimeStatus(mode)]))
-                    } else { output(broker.handle(request)) }
-                } catch { output(errorJSON(error)) }
-            }
-            if buffer.count > 524_288 { output(errorJSON(CoreError("request_too_large", "Native request exceeds 512 KiB"))); exit(1) }
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)
+        let recoveryWindow = LocalRecoveryWindow(broker: broker)
+        let recoverySocket = try LocalRecoverySocket(directory: state.directory) { recoveryWindow.open() }
+        let maintenance = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        maintenance.schedule(deadline: .now() + 60, repeating: 60)
+        maintenance.setEventHandler { _ = broker.maintainRecoveryDetails() }; maintenance.resume()
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try runNativeInput(broker: broker, mode: mode); exit(0) }
+            catch { output(errorJSON(error)); exit(1) }
         }
+        withExtendedLifetime((recoverySocket, maintenance, recoveryWindow)) { runNativeApplication() }
+    } else if args.first == "--migrate-recovery", args.count == 3, let path = flag("--state-dir", args), path.hasPrefix("/") {
+        let state = try StateStore(directory: URL(fileURLWithPath: path))
+        try state.verifyAudit()
+        output(.object(["result": try state.recoveryMetadata()]))
     } else if args.first == "--rotate-keys", args.count == 3, let path = flag("--state-dir", args) {
         let state = try StateStore(directory: URL(fileURLWithPath: path)); try state.rotateCredentials()
         output(.object(["result": .object(["rotated": .bool(true)])]))
@@ -97,5 +119,5 @@ do {
         FileHandle.standardError.write(Data("Exceptional recovery only. Confirm external inspection by typing: reconcile \(nonce)\n".utf8))
         guard readLine() == "reconcile \(nonce)" else { throw CoreError("reconciliation_cancelled", "Reconciliation not confirmed") }
         output(.object(["result": try state.reconcile(nonce: nonce, outcome: outcome, evidence: evidence)]))
-    } else { throw CoreError("invalid_configuration", "Use --status, --authorize, --serve, --rotate-keys or exceptional local --reconcile; no direct apply interface exists") }
+    } else { throw CoreError("invalid_configuration", "Use --status, --authorize, --serve, --migrate-recovery, --rotate-keys or exceptional local --reconcile; no direct apply interface exists") }
 } catch { output(errorJSON(error)); exit(1) }

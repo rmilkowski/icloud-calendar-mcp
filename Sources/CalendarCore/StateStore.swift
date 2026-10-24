@@ -4,8 +4,9 @@ import CSQLite
 import Darwin
 
 public final class StateStore {
-    private var database: OpaquePointer?
+    var database: OpaquePointer?
     private var lockFD: Int32 = -1
+    var localNativeReview = false
     public let directory: URL
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     public init(directory: URL) throws {
@@ -29,6 +30,7 @@ public final class StateStore {
         sqlite3_busy_timeout(database, 5000)
         try execute("PRAGMA journal_mode=DELETE")
         try execute("PRAGMA synchronous=FULL")
+        try execute("PRAGMA secure_delete=ON")
         try execute("PRAGMA fullfsync=ON")
         try execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         try execute("CREATE TABLE IF NOT EXISTS identities (id TEXT PRIMARY KEY, kind TEXT NOT NULL, native_id TEXT NOT NULL, calendar_id TEXT NOT NULL, occurrence TEXT NOT NULL, known_start TEXT NOT NULL, UNIQUE(kind,native_id,calendar_id,occurrence))")
@@ -47,6 +49,7 @@ public final class StateStore {
                 try rotateCredentialsInsideTransaction()
             }
         }
+        try migrateRecoveryStorage()
         try verifyAudit()
         try transaction {
             // Earlier native executions are part of the same installation budget.
@@ -64,6 +67,7 @@ public final class StateStore {
             }
             _ = try storedWriteSafetyPolicy()
         }
+        try expireRecoveryDetails(now: Date())
         // Intent survives any process termination; do not assume EventKit was untouched.
         let stranded = try rows("SELECT nonce FROM executions WHERE state='intent_recorded'")
         for row in stranded {
@@ -78,12 +82,12 @@ public final class StateStore {
             guard sqlite3_bind_text(stmt, Int32(index + 1), value, -1, transient) == SQLITE_OK else { sqlite3_finalize(stmt); throw CoreError("audit_unavailable", "Native state binding failed") }
         }; return stmt
     }
-    private func execute(_ sql: String, _ values: [String] = []) throws {
+    func execute(_ sql: String, _ values: [String] = []) throws {
         let stmt = try statement(sql, values); defer { sqlite3_finalize(stmt) }
         let code = sqlite3_step(stmt)
         guard code == SQLITE_DONE || code == SQLITE_ROW else { throw CoreError("audit_unavailable", "Native durable state operation failed") }
     }
-    private func rows(_ sql: String, _ values: [String] = []) throws -> [[String]] {
+    func rows(_ sql: String, _ values: [String] = []) throws -> [[String]] {
         let stmt = try statement(sql, values); defer { sqlite3_finalize(stmt) }
         var result: [[String]] = []
         while true {
@@ -93,7 +97,7 @@ public final class StateStore {
             result.append((0..<sqlite3_column_count(stmt)).map { i in sqlite3_column_text(stmt, i).map { String(cString: $0) } ?? "" })
         }
     }
-    private func transaction<T>(_ work: () throws -> T) throws -> T {
+    func transaction<T>(_ work: () throws -> T) throws -> T {
         try execute("BEGIN IMMEDIATE")
         do { let result = try work(); try execute("COMMIT"); return result }
         catch { try? execute("ROLLBACK"); throw error }
@@ -143,7 +147,12 @@ public final class StateStore {
     }
     public func execution(_ nonce: String) throws -> (payload: JSON, state: String, result: JSON)? {
         guard let row = try rows("SELECT payload,state,result FROM executions WHERE nonce=?", [nonce]).first else { return nil }
-        return (try JSON.parse(Data(row[0].utf8)), row[1], try JSON.parse(Data(row[2].utf8)))
+        let marker = try JSON.parse(Data(row[0].utf8))
+        return (try secret(nonce: nonce, column: "payload_cipher") ?? marker, row[1], try secret(nonce: nonce, column: "result_cipher") ?? JSON.parse(Data(row[2].utf8)))
+    }
+    public func payloadMatches(nonce: String, payload: JSON) throws -> Bool {
+        guard let row = try rows("SELECT payload FROM executions WHERE nonce=?", [nonce]).first else { return false }
+        return try JSON.parse(Data(row[0].utf8))["payload_digest"] == .string(digest(payload.data()))
     }
     public func hasUnresolved() throws -> Bool { !(try rows("SELECT nonce FROM executions WHERE state IN ('intent_recorded','unknown') LIMIT 1")).isEmpty }
     private func currentWriteSafetyPolicy() throws -> (policy: WriteSafetyPolicy, file: Bool) {
@@ -226,7 +235,7 @@ public final class StateStore {
                 _ = try appendInsideTransaction(event: "write_safety_charged", nonce: nonce, payload: accounting)
             }
             let result: JSON = .object(["nonce": .string(nonce), "state": .string("intent_recorded")])
-            try execute("INSERT INTO executions(nonce,payload,state,result,created) VALUES(?,?,'intent_recorded',?,?)", [nonce, try payload.text(), try result.text(), iso(now)])
+            try storeIntent(nonce: nonce, payload: payload, result: result, now: now)
             return (try appendInsideTransaction(event: "write_intent", nonce: nonce, payload: payload), nil)
         }
         if let rejection = result.rejection { throw rejection }; return result.sequence!
@@ -234,7 +243,7 @@ public final class StateStore {
     public func finish(nonce: String, state: String, result: JSON, event: String) throws {
         try transaction {
             guard try execution(nonce) != nil else { throw CoreError("audit_unavailable", "Execution journal missing") }
-            try execute("UPDATE executions SET state=?,result=? WHERE nonce=?", [state, try result.text(), nonce])
+            try storeResult(nonce: nonce, state: state, result: result)
             _ = try appendInsideTransaction(event: event, nonce: nonce, payload: result)
         }
     }
@@ -248,24 +257,27 @@ public final class StateStore {
     @discardableResult public func append(event: String, nonce: String?, payload: JSON) throws -> Int {
         try transaction { try appendInsideTransaction(event: event, nonce: nonce, payload: payload) }
     }
-    private func appendInsideTransaction(event: String, nonce: String?, payload: JSON) throws -> Int {
+    func appendInsideTransaction(event: String, nonce: String?, payload: JSON) throws -> Int {
         let last = try rows("SELECT sequence,hash FROM audit ORDER BY sequence DESC LIMIT 1").first
         let sequence = (last.flatMap { Int($0[0]) } ?? 0) + 1
         let previous = last?[1] ?? String(repeating: "0", count: 64)
-        let origin = event == "operator_reconciliation" ? "local_operator_attestation" : (event.contains("credential") || event == "write_safety_policy_changed" ? "local_configuration" : (event == "recovered_unknown" ? "native_recovery" : "chatgpt_host_policy"))
-        let body: JSON = .object(["version": .int(1), "sequence": .int(sequence), "event_id": .string(UUID().uuidString), "timestamp": .string(iso(Date())), "event": .string(event), "nonce": .optional(nonce), "approval_source": .string(origin), "approval_evidence": .string("not_provided"), "payload": payload])
+        let origin = ["recovery_migration_checkpoint", "details_expired"].contains(event) ? "native_maintenance" : (event == "operator_reconciliation" ? "local_operator_attestation" : (event.contains("credential") || event == "write_safety_policy_changed" ? "local_configuration" : (event == "recovered_unknown" ? "native_recovery" : "chatgpt_host_policy")))
+        let localWriteEvent = localNativeReview && ["write_intent", "write_applied", "write_unknown", "commit_replayed", "commit_rejected", "write_safety_charged", "write_safety_rejected"].contains(event)
+        let body: JSON = .object(["version": .int(2), "record_sequence": .int(sequence), "event_id": .string(UUID().uuidString), "timestamp": .string(iso(Date())), "event": .string(event), "nonce": .optional(nonce), "approval_source": .string(localWriteEvent ? "local_native_ui" : origin), "approval_evidence": .string(localWriteEvent ? "native_control_activated" : "not_provided"), "payload": safeAuditPayload(event: event, nonce: nonce, payload: payload)])
         let hash = digest(Data(previous.utf8) + (try body.data()))
         try execute("INSERT INTO audit(sequence,body,previous_hash,hash) VALUES(?,?,?,?)", [String(sequence), try body.text(), previous, hash]); return sequence
     }
+    func auditSequence(_ body: JSON) throws -> Int? { body["version"] == .int(2) ? body["record_sequence"].integer : body["sequence"].integer }
     public func verifyAudit() throws {
         var previous = String(repeating: "0", count: 64); var sequence = 0
         for row in try rows("SELECT sequence,body,previous_hash,hash FROM audit ORDER BY sequence") {
             sequence += 1
             guard row[0] == String(sequence), row[2] == previous,
                   digest(Data(previous.utf8) + Data(row[1].utf8)) == row[3],
-                  try JSON.parse(Data(row[1].utf8))["sequence"].integer == sequence else { throw CoreError("audit_corrupt", "Audit chain verification failed; writes disabled") }
+                  try auditSequence(JSON.parse(Data(row[1].utf8))) == sequence else { throw CoreError("audit_corrupt", "Audit chain verification failed; writes disabled") }
             previous = row[3]
         }
+        if try metadata("recovery_storage_version") == "2" { try verifyLegacyManifest() }
     }
     public func auditRecords() throws -> [JSON] { try rows("SELECT body FROM audit ORDER BY sequence").map { try JSON.parse(Data($0[0].utf8)) } }
 }

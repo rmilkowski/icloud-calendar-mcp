@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import select
+import stat
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,7 @@ import threading
 import unittest
 
 from calendar_mcp.adapter import GatewayClient
+from calendar_mcp.changes import socket_path
 from calendar_mcp.native import NativeBroker
 from calendar_mcp.protocol import Protocol
 from calendar_mcp.security import initialize, private_directory, read_token
@@ -24,6 +26,99 @@ HELPER = Path(os.environ.get("CALENDAR_MCP_TEST_HELPER", str(DEFAULT_HELPER)))
 
 @unittest.skipUnless(HELPER.is_file(), "Build native helper with swift build before end-to-end synthetic validation")
 class NativeIntegrationTests(unittest.TestCase):
+    def test_native_http_retained_history_pagination_and_signed_recovery(self):
+        with tempfile.TemporaryDirectory(prefix="calendar synthetic recovery ") as directory:
+            state = initialize(Path(directory) / "gateway")
+            token = read_token(state)
+            native = private_directory(state / "native-synthetic")
+            broker = NativeBroker(HELPER, native, "synthetic", credential_binding=hashlib.sha256(token.encode()).hexdigest())
+            if broker.recovery_capabilities() is None:
+                broker.close()
+                self.skipTest("Selected native helper does not implement recovery storage v2")
+            # Match the real native endpoint across Python/POSIX canonicalization,
+            # using a long state path; no review window or Apply control is opened.
+            try:
+                endpoint = socket_path(native)
+                endpoint_info = endpoint.lstat()
+                self.assertTrue(stat.S_ISSOCK(endpoint_info.st_mode))
+                self.assertEqual(stat.S_IMODE(endpoint_info.st_mode), 0o600)
+                self.assertEqual(endpoint_info.st_uid, os.getuid())
+                self.assertEqual(endpoint_info.st_nlink, 1)
+                self.assertEqual(stat.S_IMODE(endpoint.parent.lstat().st_mode), 0o700)
+            except BaseException:
+                broker.close()
+                raise
+            server = GatewayServer(0, token, Protocol(broker))
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+            thread.start()
+            try:
+                client = GatewayClient(state, server.server_port)
+                counter = 0
+
+                def tool(name, arguments=None):
+                    nonlocal counter
+                    counter += 1
+                    response = client.send(json.dumps({"jsonrpc": "2.0", "id": counter, "method": "tools/call",
+                               "params": {"name": name, "arguments": arguments or {}}}).encode())
+                    self.assertNotIn("error", response, response)
+                    self.assertFalse(response["result"]["isError"], response)
+                    return response["result"]["structuredContent"]
+
+                calendar = tool("list_calendars")["calendars"][0]["id"]
+                created = []
+                for index in range(2):
+                    preview = tool("preflight_change", {"action": "create", "scope": "this", "calendar_id": calendar,
+                                   "fields": {"title": f"Recovery original {index}", "start": "2026-10-25T10:00:00Z",
+                                              "end": "2026-10-25T11:00:00Z", "notes": f"Retained fixture {index}"}})["preview"]
+                    created.append(tool("commit_create", {"preview": preview})["event"])
+                sources = []
+                for action, event in (("modify", created[0]), ("delete", created[1])):
+                    arguments = {"action": action, "scope": "this", "event_id": event["id"]}
+                    if action == "modify":
+                        arguments["fields"] = {"title": "Modified recovery fixture"}
+                    preview = tool("preflight_change", arguments)["preview"]
+                    completed = tool("commit_" + action, {"preview": preview})
+                    sources.append(completed["nonce"])
+                first = tool("list_changes", {"limit": 1})
+                self.assertEqual(len(first["changes"]), 1)
+                self.assertIsNotNone(first["next_cursor"])
+                second = tool("list_changes", {"limit": 1, "cursor": first["next_cursor"]})
+                self.assertEqual(first["snapshot_at"], second["snapshot_at"])
+                self.assertIsNone(second["next_cursor"])
+                self.assertEqual({first["changes"][0]["change_id"], second["changes"][0]["change_id"]}, set(sources))
+                stored = tool("get_stored_change", {"change_id": sources[0]})
+                self.assertEqual(stored["before"]["fields"]["title"], "Recovery original 0")
+                self.assertEqual(stored["proposed_after"]["title"], "Modified recovery fixture")
+                self.assertFalse(stored["change"]["details_expired"])
+                plan = tool("preflight_rollback", {"change_ids": sources})
+                self.assertFalse(plan["atomic"])
+                self.assertEqual(plan["selected_count"], 2)
+                self.assertEqual(plan["step_count"], 2)
+                self.assertEqual(set(plan["selected_change_ids"]), set(sources))
+                for step in plan["steps"]:
+                    preview = step["preview"]
+                    # The ordinary tools cannot bypass the separate recovery contract.
+                    counter += 1
+                    rejected = client.send(json.dumps({"jsonrpc": "2.0", "id": counter, "method": "tools/call",
+                                           "params": {"name": "commit_" + preview["envelope"]["action"],
+                                                      "arguments": {"preview": preview}}}).encode())
+                    self.assertEqual(rejected["error"]["code"], -32602)
+                    completed = tool("commit_rollback", {"preview": preview})
+                    self.assertEqual(completed["state"], "applied")
+                    self.assertEqual(tool("commit_rollback", {"preview": preview}), completed)
+                    self.assertEqual(tool("get_change_status", {"nonce": completed["nonce"]}), completed)
+                events = tool("query_events", {"start": "2026-10-25T00:00:00Z", "end": "2026-10-26T00:00:00Z"})["events"]
+                self.assertEqual({event["fields"]["title"] for event in events}, {"Recovery original 0", "Recovery original 1"})
+                for source in sources:
+                    detail = tool("get_stored_change", {"change_id": source})
+                    self.assertIsNotNone(detail["change"]["rolled_back_by"])
+                    self.assertFalse(detail["change"]["recovery_eligible"])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                broker.close()
+
     def test_native_http_stdio_full_lifecycle_replay_and_tamper(self):
         with tempfile.TemporaryDirectory(prefix="calendar synthetic integration ") as directory:
             state = initialize(Path(directory) / "gateway")

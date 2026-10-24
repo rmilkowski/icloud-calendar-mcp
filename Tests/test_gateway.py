@@ -14,7 +14,7 @@ import time
 import unittest
 
 from calendar_mcp.adapter import GatewayClient, run_stdio
-from calendar_mcp.native import NativeBroker, NativeError
+from calendar_mcp.native import NativeBroker, NativeError, RECOVERY_CAPABILITIES
 from calendar_mcp.protocol import Protocol, VERSIONS, loads
 from calendar_mcp.schema import TOOLS, ValidationError, validate_arguments
 from calendar_mcp.security import initialize, read_token
@@ -29,6 +29,9 @@ class FakeBroker:
         self.calls.append((name, arguments))
         return {"calendars": []}
 
+    def recovery_capabilities(self):
+        return dict(RECOVERY_CAPABILITIES)
+
     def authorization_status(self):
         return {"backend_mode": "synthetic", "authorization_status": "not_applicable", "authorization_status_raw": None, "pid": os.getpid()}
 
@@ -39,7 +42,7 @@ def request(method, params=None, identifier=1):
 
 class SchemaTests(unittest.TestCase):
     def test_write_policy_and_no_approval_surface(self):
-        self.assertEqual(len(TOOLS), 9)
+        self.assertEqual(len(TOOLS), 13)
         for tool in TOOLS:
             hints = tool["annotations"]
             self.assertFalse(hints["openWorldHint"])
@@ -47,7 +50,7 @@ class SchemaTests(unittest.TestCase):
                 self.assertFalse(hints["readOnlyHint"])
                 self.assertTrue(hints["idempotentHint"])
                 self.assertEqual(set(tool["inputSchema"]["properties"]), {"preview"})
-            elif tool["name"] == "preflight_change":
+            elif tool["name"].startswith("preflight_"):
                 self.assertTrue(hints["readOnlyHint"])
                 self.assertFalse(hints["destructiveHint"])
         for name in ("apply", "approve", "calendars", "run_command"):
@@ -219,7 +222,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(run_stdio(client, source, sink), 0)
         replies = [json.loads(x) for x in sink.getvalue().splitlines()]
         self.assertEqual(len(replies), 3)
-        self.assertEqual(len(replies[1]["result"]["tools"]), 9)
+        self.assertEqual(len(replies[1]["result"]["tools"]), 13)
         self.assertEqual(replies[2]["result"]["structuredContent"], {"calendars": []})
         self.assertNotIn(self.token.encode(), sink.getvalue())
         self.assertEqual(self.broker.calls, [("list_calendars", {})])
