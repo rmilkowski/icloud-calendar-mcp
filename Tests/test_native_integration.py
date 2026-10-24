@@ -93,9 +93,9 @@ class NativeIntegrationTests(unittest.TestCase):
                 for action, patch in [("modify", {"fields": {"title": "Modified fixture"}}), ("delete", {})]:
                     prepared = stdio_tool("preflight_change", {"action": action, "scope": "this", "event_id": event_id, **patch})
                     self.assertIn("details", prepared["preview"]["envelope"]["before"])
-                    completed = stdio_tool("commit_" + action, prepared)
+                    completed = stdio_tool("commit_" + action, {"preview": prepared["preview"]})
                     self.assertEqual(completed["state"], "applied")
-                    self.assertEqual(completed, stdio_tool("commit_" + action, prepared))
+                    self.assertEqual(completed, stdio_tool("commit_" + action, {"preview": prepared["preview"]}))
                 self.assertEqual(stdio_tool("query_events", window)["events"], [])
                 adapter.stdin.close()
                 self.assertEqual(adapter.wait(timeout=3), 0)
@@ -118,7 +118,7 @@ class NativeIntegrationTests(unittest.TestCase):
                 thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
                 thread.start()
                 client = GatewayClient(state, server.server_port)
-                rejected = client.send(json.dumps({"jsonrpc": "2.0", "id": 91, "method": "tools/call", "params": {"name": "commit_create", "arguments": unexecuted}}).encode())
+                rejected = client.send(json.dumps({"jsonrpc": "2.0", "id": 91, "method": "tools/call", "params": {"name": "commit_create", "arguments": {"preview": unexecuted["preview"]}}}).encode())
                 self.assertTrue(rejected["result"]["isError"])
                 self.assertEqual(http_tool("get_change_status", {"nonce": completed["nonce"]}), completed)
             finally:
@@ -128,6 +128,65 @@ class NativeIntegrationTests(unittest.TestCase):
                         adapter.wait(timeout=3)
                     for pipe in (adapter.stdin, adapter.stdout, adapter.stderr):
                         pipe.close()
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                broker.close()
+
+    def test_native_http_quota_feedback_and_commit_recheck(self):
+        with tempfile.TemporaryDirectory(prefix="calendar synthetic safety ") as directory:
+            state = initialize(Path(directory) / "gateway")
+            token = read_token(state)
+            native = private_directory(state / "native-synthetic")
+            broker = NativeBroker(HELPER, native, "synthetic", credential_binding=hashlib.sha256(token.encode()).hexdigest())
+            server = GatewayServer(0, token, Protocol(broker))
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+            thread.start()
+            try:
+                client = GatewayClient(state, server.server_port)
+                counter = 0
+
+                def tool(name, arguments=None, error=None):
+                    nonlocal counter
+                    counter += 1
+                    response = client.send(json.dumps({"jsonrpc": "2.0", "id": counter, "method": "tools/call", "params": {"name": name, "arguments": arguments or {}}}).encode())
+                    self.assertNotIn("error", response, response)
+                    if error:
+                        self.assertTrue(response["result"]["isError"], response)
+                        failure = json.loads(response["result"]["content"][0]["text"])
+                        self.assertEqual(failure["code"], error)
+                        return failure
+                    self.assertFalse(response["result"]["isError"], response)
+                    return response["result"]["structuredContent"]
+
+                calendar = tool("list_calendars")["calendars"][0]["id"]
+                events = []
+                for index in range(2):
+                    draft = tool("preflight_change", {"action": "create", "scope": "this", "calendar_id": calendar,
+                                "fields": {"title": f"Safety fixture {index}", "start": "2026-10-25T10:00:00Z", "end": "2026-10-25T11:00:00Z"}})
+                    self.assertFalse(draft["safety"]["applies"])
+                    events.append(tool("commit_create", {"preview": draft["preview"]})["event"]["id"])
+                drafts = [tool("preflight_change", {"action": "delete", "scope": "this", "event_id": event}) for event in events]
+                self.assertEqual(drafts[0]["safety"]["policy"]["delete_hour"], 50)
+                # A policy can tighten after preflight; authenticated payload stays exact.
+                policy = native / "write-safety.json"
+                policy.write_text(json.dumps({"version": 1, "delete_hour": 1, "delete_day": 1, "destructive_hour": 1, "destructive_day": 1}))
+                policy.chmod(0o600)
+                applied = tool("commit_delete", {"preview": drafts[0]["preview"]})
+                self.assertEqual(applied["state"], "applied")
+                self.assertEqual(tool("commit_delete", {"preview": drafts[0]["preview"]}), applied)
+                failure = tool("commit_delete", {"preview": drafts[1]["preview"]}, error="write_safety_limit")
+                self.assertIn("retry no earlier than", failure["message"])
+                nonce = drafts[1]["preview"]["envelope"]["nonce"]
+                self.assertEqual(tool("get_change_status", {"nonce": nonce})["state"], "not_received")
+                feedback = tool("preflight_change", {"action": "delete", "scope": "this", "event_id": events[1]})["safety"]
+                self.assertFalse(feedback["allowed_now"])
+                self.assertEqual(feedback["usage"]["delete_hour"]["used"], 1)
+                policy.unlink()
+                tool("preflight_change", {"action": "delete", "scope": "this", "event_id": events[1]}, error="write_safety_configuration")
+                self.assertEqual(tool("commit_delete", {"preview": drafts[0]["preview"]}), applied)
+                self.assertEqual(tool("get_event", {"event_id": events[1]})["event"]["id"], events[1])
+            finally:
                 server.shutdown()
                 server.server_close()
                 thread.join()

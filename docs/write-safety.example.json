@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "delete_hour": 50,
+  "delete_day": 200,
+  "destructive_hour": 100,
+  "destructive_day": 500
+}

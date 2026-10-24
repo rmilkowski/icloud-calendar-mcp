@@ -134,10 +134,11 @@ public final class Broker: @unchecked Sendable {
             }
         }
         let issued = now()
+        let safety = try state.writeSafety(action: action, now: issued)
         let envelope: JSON = .object(["version": .int(1), "nonce": .string(UUID().uuidString), "issued_at": .string(iso(issued)), "expires_at": .string(iso(issued.addingTimeInterval(600))), "installation_id": .string(try requiredMetadata("installation_id")), "credential_generation": .string(try requiredMetadata("credential_generation")), "key_id": .string(try requiredMetadata("key_id")), "action": .string(action), "scope": .string("this"), "calendar": calendar, "before": before, "after": after])
         guard try envelope.data().count <= 262_144 else { throw CoreError("preview_too_large", "Event review exceeds native preview limit") }
         let tag = HMAC<SHA256>.authenticationCode(for: try envelope.data(), using: try signingKey())
-        return .object(["preview": .object(["envelope": envelope, "authentication_tag": .string(Data(tag).base64EncodedString())])])
+        return .object(["preview": .object(["envelope": envelope, "authentication_tag": .string(Data(tag).base64EncodedString())]), "safety": safety])
     }
     private func requiredMetadata(_ key: String) throws -> String {
         guard let value = try state.metadata(key) else { throw CoreError("state_corrupt", "Native identity configuration missing") }; return value

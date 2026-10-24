@@ -33,6 +33,10 @@ public final class StateStore {
         try execute("CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         try execute("CREATE TABLE IF NOT EXISTS identities (id TEXT PRIMARY KEY, kind TEXT NOT NULL, native_id TEXT NOT NULL, calendar_id TEXT NOT NULL, occurrence TEXT NOT NULL, known_start TEXT NOT NULL, UNIQUE(kind,native_id,calendar_id,occurrence))")
         try execute("CREATE TABLE IF NOT EXISTS executions (nonce TEXT PRIMARY KEY, payload TEXT NOT NULL, state TEXT NOT NULL, result TEXT NOT NULL, created TEXT NOT NULL)")
+        try execute("CREATE TABLE IF NOT EXISTS write_safety_claims (nonce TEXT PRIMARY KEY, action TEXT NOT NULL CHECK(action IN ('modify','delete')), charged_at TEXT NOT NULL)")
+        try execute("CREATE INDEX IF NOT EXISTS write_safety_time ON write_safety_claims(charged_at)")
+        try execute("CREATE TRIGGER IF NOT EXISTS write_safety_no_update BEFORE UPDATE ON write_safety_claims BEGIN SELECT RAISE(ABORT,'immutable quota claim'); END")
+        try execute("CREATE TRIGGER IF NOT EXISTS write_safety_no_delete BEFORE DELETE ON write_safety_claims BEGIN SELECT RAISE(ABORT,'immutable quota claim'); END")
         try execute("CREATE TABLE IF NOT EXISTS audit (sequence INTEGER PRIMARY KEY, body TEXT NOT NULL, previous_hash TEXT NOT NULL, hash TEXT NOT NULL)")
         try execute("CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit BEGIN SELECT RAISE(ABORT,'append only'); END")
         try execute("CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit BEGIN SELECT RAISE(ABORT,'append only'); END")
@@ -44,6 +48,22 @@ public final class StateStore {
             }
         }
         try verifyAudit()
+        try transaction {
+            // Earlier native executions are part of the same installation budget.
+            // Outcomes never refund quota, including a not_applied attestation.
+            for row in try rows("SELECT e.nonce,e.payload,e.created FROM executions e LEFT JOIN write_safety_claims q ON q.nonce=e.nonce WHERE q.nonce IS NULL") {
+                let payload = try JSON.parse(Data(row[1].utf8))
+                guard let action = payload["action"].string, ["create", "modify", "delete"].contains(action) else { throw CoreError("state_corrupt", "Execution journal has an invalid action") }
+                let created = try parseDate(row[2])
+                if action != "create" {
+                    try execute("INSERT INTO write_safety_claims(nonce,action,charged_at) VALUES(?,?,?)", [row[0], action, iso(created)])
+                }
+            }
+            if try metadata("write_safety_policy") == nil {
+                _ = try adoptWriteSafetyPolicy(loaded: (WriteSafetyPolicy.defaults, false))
+            }
+            _ = try storedWriteSafetyPolicy()
+        }
         // Intent survives any process termination; do not assume EventKit was untouched.
         let stranded = try rows("SELECT nonce FROM executions WHERE state='intent_recorded'")
         for row in stranded {
@@ -126,14 +146,90 @@ public final class StateStore {
         return (try JSON.parse(Data(row[0].utf8)), row[1], try JSON.parse(Data(row[2].utf8)))
     }
     public func hasUnresolved() throws -> Bool { !(try rows("SELECT nonce FROM executions WHERE state IN ('intent_recorded','unknown') LIMIT 1")).isEmpty }
+    private func currentWriteSafetyPolicy() throws -> (policy: WriteSafetyPolicy, file: Bool) {
+        if let policy = try WriteSafetyPolicy.read(directory: directory) { return (policy, true) }
+        guard try metadata("write_safety_file_adopted") != "true" else { throw CoreError("write_safety_configuration", "Previously adopted local write-safety.json is missing; restore a protected valid policy before writing") }
+        return (WriteSafetyPolicy.defaults, false)
+    }
+    private func storedWriteSafetyPolicy() throws -> WriteSafetyPolicy {
+        guard let canonical = try metadata("write_safety_policy"),
+              try metadata("write_safety_hash") == digest(Data(canonical.utf8)),
+              let revision = try metadata("write_safety_revision").flatMap(Int.init), revision > 0,
+              ["true", "false"].contains(try metadata("write_safety_file_adopted") ?? "") else {
+            throw CoreError("state_corrupt", "Invalid durable write safety configuration")
+        }
+        return try WriteSafetyPolicy(json: JSON.parse(Data(canonical.utf8)))
+    }
+    /// Only called within a transaction. Configuration adoption does not erase usage.
+    private func adoptWriteSafetyPolicy(loaded supplied: (policy: WriteSafetyPolicy, file: Bool)? = nil) throws -> WriteSafetyPolicy {
+        let loaded = try supplied ?? currentWriteSafetyPolicy()
+        let canonical = try loaded.policy.json.text(), previous = try metadata("write_safety_policy")
+        let adopted = try metadata("write_safety_file_adopted") == "true"
+        if previous != canonical || (loaded.file && !adopted) {
+            let revision = (try metadata("write_safety_revision").flatMap(Int.init) ?? 0) + 1
+            try setMetadata("write_safety_policy", canonical)
+            try setMetadata("write_safety_hash", digest(Data(canonical.utf8)))
+            try setMetadata("write_safety_revision", String(revision))
+            try setMetadata("write_safety_file_adopted", loaded.file || adopted ? "true" : "false")
+            _ = try appendInsideTransaction(event: "write_safety_policy_changed", nonce: nil, payload: .object([
+                "previous": try previous.map { try JSON.parse(Data($0.utf8)) } ?? .null,
+                "policy": loaded.policy.json, "revision": .int(revision),
+                "policy_hash": .string(digest(Data(canonical.utf8))), "source": .string(loaded.file ? "local_file" : "defaults")
+            ]))
+        }
+        return loaded.policy
+    }
+    private func writeSafetySnapshot(action: String, now: Date, policy: WriteSafetyPolicy) throws -> (json: JSON, rejection: CoreError?) {
+        let latest = try rows("SELECT charged_at FROM write_safety_claims ORDER BY charged_at DESC LIMIT 1").first?.first
+        let effective = try latest.map { max(now, try parseDate($0)) } ?? now
+        let claims = try rows("SELECT action,charged_at FROM write_safety_claims WHERE charged_at>? ORDER BY charged_at", [iso(effective.addingTimeInterval(-86_400))])
+        let windows: [(String, String?, TimeInterval, Int)] = [
+            ("delete_hour", "delete", 3600, policy.deleteHour), ("delete_day", "delete", 86_400, policy.deleteDay),
+            ("destructive_hour", nil, 3600, policy.destructiveHour), ("destructive_day", nil, 86_400, policy.destructiveDay)
+        ]
+        var usage: [String: JSON] = [:], blocked: [String] = [], retry: Date?
+        for (name, filter, seconds, limit) in windows {
+            let times = try claims.filter { filter == nil || $0[0] == filter }.map { try parseDate($0[1]) }.filter { $0 > effective.addingTimeInterval(-seconds) }
+            let applicable = action == "delete" || (action == "modify" && filter == nil)
+            let next = times.count >= limit ? times[times.count - limit].addingTimeInterval(seconds) : nil
+            usage[name] = .object(["limit": .int(limit), "used": .int(times.count), "remaining": .int(max(0, limit - times.count)), "window_seconds": .int(Int(seconds)), "next_available_at": next.map { .string(iso($0)) } ?? .null])
+            if applicable && times.count >= limit { blocked.append(name); if let next { retry = max(retry ?? next, next) } }
+        }
+        let status: JSON = .object([
+            "policy": policy.json, "policy_hash": .string(digest(try policy.json.data())),
+            "action": .string(action), "applies": .bool(action != "create"), "allowed_now": .bool(blocked.isEmpty),
+            "effective_at": .string(iso(effective)), "clock_rollback": .bool(effective > now), "usage": .object(usage),
+            "retry_at": retry.map { .string(iso($0)) } ?? .null, "advisory": .bool(true),
+            "message": .string("Installation-wide durable intent budgets across calls, chats and restarts. Modify and delete share the destructive limits. Preflight reserves no capacity; commit checks current local policy again.")
+        ])
+        let rejection = retry.map { CoreError("write_safety_limit", "Local write safety limit reached (\(blocked.joined(separator: ", "))); retry no earlier than \(iso($0)). Wait or ask the local operator to adjust protected write-safety.json; a new chat or preview does not reset usage") }
+        return (status, rejection)
+    }
+    public func writeSafety(action: String, now: Date) throws -> JSON {
+        try writeSafetySnapshot(action: action, now: now, policy: action == "create" ? storedWriteSafetyPolicy() : currentWriteSafetyPolicy().policy).json
+    }
     public func claim(nonce: String, payload: JSON, now: Date) throws -> Int {
-        try transaction {
+        let result: (sequence: Int?, rejection: CoreError?) = try transaction {
             guard try execution(nonce) == nil else { throw CoreError("nonce_replayed", "Nonce already claimed") }
             guard try !hasUnresolved() else { throw CoreError("unresolved_write", "An earlier write outcome is unresolved; inspect status and reconcile locally") }
+            guard let action = payload["action"].string, ["create", "modify", "delete"].contains(action) else { throw CoreError("invalid_preview", "Invalid execution action") }
+            if action != "create" {
+                let policy = try adoptWriteSafetyPolicy()
+                let snapshot = try writeSafetySnapshot(action: action, now: now, policy: policy)
+                let accounting: JSON = .object(["safety": snapshot.json, "policy_revision": .string(try metadata("write_safety_revision") ?? "")])
+                // Keep accepted configuration and its audit even when quota denies a new intent.
+                if let rejection = snapshot.rejection {
+                    _ = try appendInsideTransaction(event: "write_safety_rejected", nonce: nonce, payload: accounting)
+                    return (nil, rejection)
+                }
+                try execute("INSERT INTO write_safety_claims(nonce,action,charged_at) VALUES(?,?,?)", [nonce, action, snapshot.json["effective_at"].string!])
+                _ = try appendInsideTransaction(event: "write_safety_charged", nonce: nonce, payload: accounting)
+            }
             let result: JSON = .object(["nonce": .string(nonce), "state": .string("intent_recorded")])
             try execute("INSERT INTO executions(nonce,payload,state,result,created) VALUES(?,?,'intent_recorded',?,?)", [nonce, try payload.text(), try result.text(), iso(now)])
-            return try appendInsideTransaction(event: "write_intent", nonce: nonce, payload: payload)
+            return (try appendInsideTransaction(event: "write_intent", nonce: nonce, payload: payload), nil)
         }
+        if let rejection = result.rejection { throw rejection }; return result.sequence!
     }
     public func finish(nonce: String, state: String, result: JSON, event: String) throws {
         try transaction {
@@ -156,7 +252,7 @@ public final class StateStore {
         let last = try rows("SELECT sequence,hash FROM audit ORDER BY sequence DESC LIMIT 1").first
         let sequence = (last.flatMap { Int($0[0]) } ?? 0) + 1
         let previous = last?[1] ?? String(repeating: "0", count: 64)
-        let origin = event == "operator_reconciliation" ? "local_operator_attestation" : (event.contains("credential") ? "local_configuration" : (event == "recovered_unknown" ? "native_recovery" : "chatgpt_host_policy"))
+        let origin = event == "operator_reconciliation" ? "local_operator_attestation" : (event.contains("credential") || event == "write_safety_policy_changed" ? "local_configuration" : (event == "recovered_unknown" ? "native_recovery" : "chatgpt_host_policy"))
         let body: JSON = .object(["version": .int(1), "sequence": .int(sequence), "event_id": .string(UUID().uuidString), "timestamp": .string(iso(Date())), "event": .string(event), "nonce": .optional(nonce), "approval_source": .string(origin), "approval_evidence": .string("not_provided"), "payload": payload])
         let hash = digest(Data(previous.utf8) + (try body.data()))
         try execute("INSERT INTO audit(sequence,body,previous_hash,hash) VALUES(?,?,?,?)", [String(sequence), try body.text(), previous, hash]); return sequence

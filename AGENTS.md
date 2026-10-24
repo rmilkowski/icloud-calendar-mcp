@@ -6,6 +6,11 @@
 - Architecture decisions, architecture reviews and code reviews: Astra with high reasoning.
 - Use these roles when explicitly delegating implementation, architecture or review work. Model overrides require a fresh-context agent (`fork_turns: "none"`); supply the task, current decisions and relevant files explicitly.
 
+## Operational workflow
+
+- Restarting services is approved when implementing fixes or new features.
+- Commit each feature or fix separately.
+
 ## Architecture maintenance
 
 Read `docs/architecture.md` before system changes. Update it in the same change as architecture decisions, tool contracts, trust boundaries, confirmation behavior, audit design or implementation milestones. Keep diagrams and status accurate; distinguish planned, implemented and verified behavior.

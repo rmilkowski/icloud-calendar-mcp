@@ -281,6 +281,46 @@ Historical validation on 23 October 2026: 16 native tests and the then-current 2
 
 The user verified an end-to-end real read on ChatGPT iPhone, then a test create and delete. Read-only journal/audit checks found create and delete both `applied`, matching `write_intent` → `write_applied` records, a valid five-record chain and no unresolved executions. Native completion follows EventKit read-back/deletion verification. The user confirmed a ChatGPT prompt before **create**; the delete prompt and complete UI fields were not independently verified. No event details, exact personal times or opaque IDs are recorded here. Real modify and provider/recurrence/timezone edge cases remain unverified. Backend audit does not provide cryptographic proof of fresh human approval.
 
+A later write-safety rollout precheck on 24 October found one existing durable `unknown` delete, with a valid eight-record audit chain and no in-flight `intent_recorded` execution. This supersedes the earlier zero-unresolved observation above. Its nonce and history must be preserved; the unknown outcome blocks every fresh write until separate evidence-based local reconciliation. The rollout itself does not reconcile or retry it.
+
+Write-safety production activation awaits approval. The original helper continues with unchanged full Calendar access; gateway and tunnel are healthy, both service jobs are registered, and the monitor is fresh. The deployed adapter initialized and listed nine tools with zero tool calls. Native state remains two applied executions, one unknown execution and the valid eight-record audit chain; no native migration, protected-state backup, helper replacement or Calendar query/mutation occurred during this handoff.
+
+## Bulk modify and delete protection
+
+The native source implementation adds cumulative protections for destructive changes. Current tool wording describes these as conditional on an upgraded broker: if preflight has no `safety` feedback, cumulative protection is not confirmed. The settled Studio helper described above must be deliberately rebuilt/deployed before it enforces this policy; editing source or placing a policy file beside an older helper does not enable it. Replacing an ad-hoc signed helper may require granting Calendar access to the replacement again. Preserve the current bundle until that rollout is authorized and verified.
+
+Source validation passed all 29 native tests, including 13 new policy tests, and ran 58 Python tests with 55 passing and three explicit LaunchServices tests skipped. The quota/commit-recheck integration check used an isolated newly built synthetic helper. No authorized bundle, running service or Calendar data was changed.
+
+Default allowances are **50 deletes per rolling hour and 200 per rolling 24 hours**, with an additional **100 combined modifies/deletes per rolling hour and 500 per rolling 24 hours**. A delete counts in both categories. Creates do not consume these destructive allowances. There is no smaller burst cap: dozens of changes can run promptly if sufficient allowance remains.
+
+Every fresh durable modify/delete intent counts, even repeated edits of the same event, across chats, calls, calendars, credentials and restarts. Preflight and rejected attempts before durable intent do not count; replay of an existing nonce does not count again. Unknown outcomes and later `not_applied` reconciliation retain their charge. Preflight returns advisory `safety` feedback beside the signed `preview`, with per-limit usage/remaining allowance and retry-time information; commit accepts only the preview and checks the current allowance atomically with recording its exact immutable intent before EventKit. Another call or a local policy change can therefore invalidate the earlier allowance estimate. Check the original nonce's status after a lost response; do not generate replacement previews to retry an uncertain write.
+
+A trusted local operator can edit the fixed policy at:
+
+```text
+$HOME/Library/Application Support/Private Calendar MCP/native-eventkit/write-safety.json
+```
+
+For a custom gateway state directory use its `native-eventkit/write-safety.json`; synthetic state uses `native-synthetic/write-safety.json`. The path is fixed by the native state directory and cannot be supplied through an MCP call. The sanitized [policy example](write-safety.example.json) contains the defaults:
+
+```json
+{
+  "version": 1,
+  "delete_hour": 50,
+  "delete_day": 200,
+  "destructive_hour": 100,
+  "destructive_day": 500
+}
+```
+
+Use a trusted local editor to save the complete JSON as a user-owned regular file with **mode `0600`** inside the protected **`0700`** native directory. Preserve an existing policy rather than blindly copying the example over it. Symlinks, multiple hard links, files larger than 16 KiB, unknown/duplicate fields, noninteger limits and partial JSON are rejected. Each limit must be 1–100000; each day value must be at least its hour value, and each `destructive` value at least the corresponding `delete` value. There is no disable/unlimited setting. Atomic replacement by a protected regular file avoids exposing partially saved JSON; an invalid intermediate save fails closed.
+
+The broker reloads the file during destructive preflight/commit, so a valid policy update needs no service restart. Preflight is advisory and does not adopt the file. A destructive commit durably adopts accepted policy revisions and audits their old/new values, hash and revision as local configuration, including if that commit is then rejected for insufficient quota. Initially, absence uses defaults; once a commit adopts an explicit file, removing it fails closed for new destructive calls rather than restoring defaults. Restore a complete valid protected file to repair that condition. Missing/invalid file errors use `write_safety_configuration`; exhausted limits use `write_safety_limit` with a safe retry time. These policy errors leave reads, status, creates and authenticated replays available; the existing unresolved-intent guard still blocks every new write. Native database corruption/migration errors can still prevent startup. Raising or lowering limits never resets the durable usage ledger, even if the file is changed back. Native startup backfills existing durable modify/delete intents during upgrade. Restarting, credential rotation and reconciliation also preserve counts and the effective-time watermark used to clamp backward clock movement.
+
+For a larger intended job, identify the exact changes, inspect the `safety` usage returned by a relevant `preflight_change`, and choose explicit local limits sufficient for the job plus existing rolling usage. Edit only the needed local values. Each write still uses a complete preview and the host's normal confirmation policy; quota is not consent. Return to the preferred limits afterward; charges remain until their windows expire. If limits are lowered below recent usage, further charged writes remain blocked until usage ages out or the operator sets sufficient limits. No remote caller can raise these values.
+
+These safeguards bound volume and rate, not intent. A harmful request below the caps can still fit within them, particularly for a small calendar. They do not cover changes made through other apps, prove a fresh human click, or resist a same-user attacker rewriting protected state. Advancing the trusted system clock can age the rolling windows. Preserve complete state/history across maintenance and backups as described below.
+
 ## Event scope, recovery and private state
 
 Query windows are bounded to 93 days and 1000 events. IDs are opaque integration references; do not substitute titles/times for identity or guess a new ID when a provider changes one. Missing/ambiguous identity needs a fresh query. Writes address one event or an explicitly selected recurring occurrence (`scope: "this"`); whole-series creation/change and invitation/organizer mutations are unsupported. Nil-timezone all-day mutations, email/procedure alarms and location edits that cannot preserve an existing structured location are rejected.
@@ -297,14 +337,14 @@ Before any stopped-state maintenance below—credential rotation, backup/restore
 
 To rotate the gateway credential while stopped, securely remove or archive only the old protected `gateway.token`, run `init`, then resume using the same native state through either service installation or the manual startup commands. The new token's local SHA-256 binding rotates native signing key/key ID/generation while preserving journal history. A running gateway retains its old token until stopped. Revoke/rotate the tunnel credential separately and securely update the approved local env file; service installation or a manual managed reconnect reloads its environment reference.
 
-Retention is indefinite. There is no audit export/purge or automatic backup CLI. Back up the entire protected native state only with the broker fully stopped; never copy/overwrite a live SQLite database or manually delete audit/journal rows. After restoring a stopped backup, invalidate old preview authentication before restarting:
+Retention is indefinite. There is no audit export/purge, automatic backup or history-merge CLI. Back up the entire protected native state only with the broker fully stopped, including policy, journal, immutable quota ledger and effective-time watermark. Never copy/overwrite a live SQLite database or manually delete audit/journal/quota rows. Never replace newer authoritative history with an older backup and resume writes: later nonces, intents and quota charges would be missing. Preserve or recover the newer immutable execution/quota history first; if it is unavailable, keep writes stopped for operator recovery. Key rotation cannot reconstruct missing history. For a valid stopped-state restore with authoritative history retained, invalidate old preview authentication before restarting:
 
 ```sh
 "$PWD/build/Calendar MCP Helper.app/Contents/MacOS/CalendarHelper" \
   --rotate-keys --state-dir "$HOME/Library/Application Support/Private Calendar MCP/native-eventkit"
 ```
 
-This is local state maintenance, not EventKit access. Restoring an older backup cannot recover omitted external writes; inspect possible outcomes before resuming. Audit hash chains are tamper-evident relative to a trusted checkpoint, not tamper-proof against the same user rewriting history.
+This is local state maintenance, not EventKit access. A backup cannot recover external writes made after it was taken; inspect possible outcomes and retain/recover their newer native history before resuming writes. Audit hash chains are tamper-evident relative to a trusted checkpoint, not tamper-proof against the same user rewriting history.
 
 For an unresolved outcome, stop the gateway, inspect independent evidence, then use exceptional local attestation:
 
