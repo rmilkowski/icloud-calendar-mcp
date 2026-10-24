@@ -1,6 +1,7 @@
 """Auditable JSON Schema subset, shared by tool publication and validation."""
 
-from datetime import datetime
+from copy import deepcopy
+from datetime import datetime, timezone
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -71,6 +72,35 @@ ROLLBACK_PREVIEW = obj({"envelope": ROLLBACK_ENVELOPE,
                         "authentication_tag": string(256, minLength=1)},
                        ("envelope", "authentication_tag"))
 
+ALERT = {"oneOf": [obj({"relative_minutes": {"type": "integer", "minimum": -525600,
+                                            "maximum": 525600}}, ("relative_minutes",)),
+                   obj({"at": STAMP}, ("at",))]}
+ALERTS = {"type": "array", "items": ALERT, "maxItems": 10,
+          "description": "Complete replacement list of display alerts. Negative relative_minutes is before start; positive is after start; zero is at start. Relative minutes are elapsed time, including all-day events and DST. at is an absolute timestamp. [] clears all alerts; omission preserves existing alerts on modify and defaults to [] on create."}
+ALERT_FIELDS = {**FIELDS, "properties": {**FIELDS["properties"], "alerts": ALERTS}}
+ALERT_REVIEW_FIELDS = {**REVIEW_FIELDS, "properties": {**REVIEW_FIELDS["properties"], "alerts": ALERTS}}
+ALERT_ENVELOPE_BASE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
+                  "version": {"type": "integer", "enum": [2]},
+                  "after": {**ALERT_REVIEW_FIELDS, "type": ["object", "null"]}}}
+ALERT_ENVELOPE = {"oneOf": [
+    {**ALERT_ENVELOPE_BASE, "properties": {**ALERT_ENVELOPE_BASE["properties"],
+     "action": string(enum=["create"]),
+     "after": {**ALERT_REVIEW_FIELDS, "required": [*ALERT_REVIEW_FIELDS["required"], "alerts"]}}},
+    {**ALERT_ENVELOPE_BASE, "properties": {**ALERT_ENVELOPE_BASE["properties"],
+     "action": string(enum=["modify", "delete"])}}]}
+ALERT_PREVIEW = obj({"envelope": ALERT_ENVELOPE, "authentication_tag": string(256, minLength=1)},
+                    ("envelope", "authentication_tag"))
+RAW_ALARMS = {"type": "array", "maxItems": 10000,
+              "items": {"type": "object", "properties": {}, "required": [], "additionalProperties": True}}
+ALERT_ROLLBACK = {**ROLLBACK, "properties": {**ROLLBACK["properties"], "alarm_restoration": RAW_ALARMS},
+                  "required": [*ROLLBACK["required"], "alarm_restoration"]}
+ALERT_ROLLBACK_ENVELOPE = {**ROLLBACK_ENVELOPE,
+    "properties": {**ROLLBACK_ENVELOPE["properties"], "version": {"type": "integer", "enum": [2]},
+                   "after": REVIEW_FIELDS, "rollback": ALERT_ROLLBACK}}
+ALERT_ROLLBACK_PREVIEW = obj({"envelope": ALERT_ROLLBACK_ENVELOPE,
+                             "authentication_tag": string(256, minLength=1)},
+                            ("envelope", "authentication_tag"))
+
 
 def tool(name, description, schema, *, write=False, destructive=False):
     return {"name": name, "description": description, "inputSchema": schema,
@@ -103,6 +133,19 @@ TOOLS = [
 ]
 TOOL_MAP = {t["name"]: t for t in TOOLS}
 RECOVERY_TOOLS = frozenset(("list_changes", "get_stored_change", "preflight_rollback", "commit_rollback"))
+LEGACY_TOOLS = deepcopy(TOOLS)
+LEGACY_TOOL_MAP = {t["name"]: t for t in LEGACY_TOOLS}
+for _tool in TOOLS:
+    if _tool["name"] == "preflight_change":
+        _tool["inputSchema"]["properties"]["fields"] = ALERT_FIELDS
+        _tool["description"] += " fields.alerts replaces the complete alert list (maximum 10 display alerts): use relative_minutes or an absolute at timestamp. Omit to preserve existing alerts on modify; [] clears them. Creation accepts alerts and defaults to none. Existing complete alarms are read in event.details.alarms."
+    elif _tool["name"].startswith("commit_"):
+        _tool["inputSchema"]["properties"]["preview"] = {"oneOf": [
+            ROLLBACK_PREVIEW, ALERT_ROLLBACK_PREVIEW] if _tool["name"] == "commit_rollback" else [PREVIEW, ALERT_PREVIEW]}
+
+
+def tools_for_capabilities(*, alerts):
+    return TOOLS if alerts else LEGACY_TOOLS
 
 
 class ValidationError(ValueError):
@@ -112,6 +155,17 @@ class ValidationError(ValueError):
 def validate(value, schema, path="arguments", depth=0):
     if depth > 20:
         raise ValidationError("JSON nesting exceeds limit")
+    if "oneOf" in schema:
+        matched = 0
+        for choice in schema["oneOf"]:
+            try:
+                validate(value, choice, path, depth)
+                matched += 1
+            except ValidationError:
+                pass
+        if matched != 1:
+            raise ValidationError(path + " must match exactly one supported form")
+        return
     kind = schema["type"]
     kinds = kind if isinstance(kind, list) else [kind]
     actual = ("null" if value is None else "boolean" if isinstance(value, bool) else
@@ -158,10 +212,11 @@ def validate(value, schema, path="arguments", depth=0):
                 raise ValidationError(path + " requires a recognized IANA time zone") from None
 
 
-def validate_arguments(name, arguments):
-    if name not in TOOL_MAP:
+def validate_arguments(name, arguments, *, alerts=True):
+    tools = TOOL_MAP if alerts else LEGACY_TOOL_MAP
+    if name not in tools:
         raise ValidationError("Unknown tool")
-    validate(arguments, TOOL_MAP[name]["inputSchema"])
+    validate(arguments, tools[name]["inputSchema"])
     if name == "preflight_change":
         action = arguments["action"]
         fields = arguments.get("fields")
@@ -170,6 +225,17 @@ def validate_arguments(name, arguments):
                 raise ValidationError("Create requires calendar_id and title/start/end only")
         elif "event_id" not in arguments or "calendar_id" in arguments or (action == "delete" and fields is not None) or (action == "modify" and not fields):
             raise ValidationError("Modify/delete require event_id and action-appropriate fields")
+        if fields and "alerts" in fields:
+            normalized = []
+            for alert in fields["alerts"]:
+                try:
+                    key = (("relative", alert["relative_minutes"]) if "relative_minutes" in alert else
+                           ("absolute", datetime.fromisoformat(alert["at"].replace("Z", "+00:00")).astimezone(timezone.utc)))
+                except (ValueError, OverflowError):
+                    raise ValidationError("Alert timestamp cannot be represented in UTC") from None
+                if key in normalized:
+                    raise ValidationError("Alerts must not contain duplicate triggers")
+                normalized.append(key)
     if name.startswith("commit_") and name != "commit_rollback" and arguments["preview"]["envelope"]["action"] != name.removeprefix("commit_"):
         raise ValidationError("Preview action does not match commit tool")
     if name == "commit_rollback":

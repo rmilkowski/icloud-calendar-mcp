@@ -42,6 +42,12 @@ final class EventKitBackend: CalendarBackend {
         try refresh(); return try record(resolve(nativeID: nativeID, calendarID: calendarID, occurrence: occurrence, knownStart: knownStart))
     }
     func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord? {
+        try apply(action: action, calendarID: calendarID, existing: existing, fields: fields, alarmRestoration: nil)
+    }
+    func applyRestoringAlarms(calendarID: String, existing: EventRecord, fields: EventFields, alarms: JSON) throws -> EventRecord? {
+        try apply(action: "modify", calendarID: calendarID, existing: existing, fields: fields, alarmRestoration: alarms)
+    }
+    private func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?, alarmRestoration: JSON?) throws -> EventRecord? {
         try refresh()
         guard let c = store.calendar(withIdentifier: calendarID), calendar(c).writable else { throw CoreError("read_only", "Calendar is no longer writable") }
         let e: EKEvent
@@ -59,6 +65,13 @@ final class EventKitBackend: CalendarBackend {
         if existing == nil || existing?.fields.end != fields.end { e.endDate = end }
         if existing == nil || existing?.fields.location != fields.location { e.location = fields.location }
         if existing == nil || existing?.fields.notes != fields.notes { e.notes = fields.notes }
+        if let alarmRestoration { e.alarms = try restoredAlarms(alarmRestoration) }
+        else if let alerts = fields.alerts {
+            e.alarms = try alerts.map { alert in
+                if let at = alert.at { return EKAlarm(absoluteDate: try parseDate(at)) }
+                return EKAlarm(relativeOffset: Double(alert.relativeMinutes!) * 60)
+            }
+        }
         try store.save(e, span: .thisEvent, commit: true)
         return try record(e) // Identity provenance only; broker re-fetches for verification.
     }
@@ -70,16 +83,7 @@ final class EventKitBackend: CalendarBackend {
         e.startDate = start; e.endDate = end; e.location = fields.location; e.notes = fields.notes
         if let value = details["url"].string { guard let url = URL(string: value) else { throw CoreError("unsupported_restore", "Stored event URL is invalid") }; e.url = url }
         e.structuredLocation = try restoredLocation(details["structured_location"])
-        e.alarms = try (details["alarms"].array ?? []).map { value in
-            let alarm: EKAlarm
-            if let absolute = value["absolute_date"].string { alarm = EKAlarm(absoluteDate: try parseDate(absolute)) }
-            else { guard let offset = value["relative_offset"].string.flatMap(Double.init), offset.isFinite else { throw CoreError("unsupported_restore", "Invalid retained alarm offset") }; alarm = EKAlarm(relativeOffset: offset) }
-            guard let raw = value["proximity"].integer, let proximity = EKAlarmProximity(rawValue: raw) else { throw CoreError("unsupported_restore", "Unsupported alarm proximity") }
-            alarm.proximity = proximity; alarm.structuredLocation = try restoredLocation(value["structured_location"])
-            guard let type = value["type"].integer, let alarmType = EKAlarmType(rawValue: type), alarmType == .display || alarmType == .audio else { throw CoreError("unsupported_restore", "Only display and audio alarms can be restored") }
-            alarm.soundName = value["sound_name"].string
-            return alarm
-        }
+        e.alarms = try restoredAlarms(details["alarms"])
         switch availability {
         case "free": e.availability = .free
         case "busy": e.availability = .busy
@@ -90,6 +94,19 @@ final class EventKitBackend: CalendarBackend {
         }
         try store.save(e, span: .thisEvent, commit: true)
         return try record(e)
+    }
+    private func restoredAlarms(_ values: JSON) throws -> [EKAlarm] {
+        guard let values = values.array else { throw CoreError("unsupported_restore", "Retained alarms must be an array") }
+        return try values.map { value in
+            let alarm: EKAlarm
+            if let absolute = value["absolute_date"].string { alarm = EKAlarm(absoluteDate: try parseDate(absolute)) }
+            else { guard let offset = value["relative_offset"].string.flatMap(Double.init), offset.isFinite else { throw CoreError("unsupported_restore", "Invalid retained alarm offset") }; alarm = EKAlarm(relativeOffset: offset) }
+            guard let raw = value["proximity"].integer, let proximity = EKAlarmProximity(rawValue: raw) else { throw CoreError("unsupported_restore", "Unsupported alarm proximity") }
+            alarm.proximity = proximity; alarm.structuredLocation = try restoredLocation(value["structured_location"])
+            guard let type = value["type"].integer, let alarmType = EKAlarmType(rawValue: type), alarmType == .display || alarmType == .audio else { throw CoreError("unsupported_restore", "Only display and audio alarms can be restored") }
+            alarm.soundName = value["sound_name"].string
+            return alarm
+        }
     }
     private func restoredLocation(_ value: JSON) throws -> EKStructuredLocation? {
         if value == .null { return nil }

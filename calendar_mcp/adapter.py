@@ -33,7 +33,9 @@ class GatewayClient:
                 return None
             if response.status != 200:
                 raise ValueError("Gateway rejected request")
-            return loads(body)
+            # Published JSON Schemas contain deeper oneOf branches than tool
+            # arguments. Keep incoming request limits separate from responses.
+            return loads(body, max_depth=32)
         finally:
             connection.close()
 

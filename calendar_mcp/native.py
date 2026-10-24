@@ -13,6 +13,7 @@ from .launch_services import LaunchServicesProcess
 MAX_NATIVE = 4 * 1024 * 1024
 RECOVERY_CAPABILITIES = {"version": 1, "storage_version": 2, "recovery": True,
                          "detail_retention": True, "local_ui": True, "max_selection": 25}
+ALERTS_CAPABILITIES = {"version": 1, "alerts": True, "max_alerts": 10, "preview_version": 2}
 
 
 class NativeError(Exception):
@@ -95,6 +96,20 @@ class NativeBroker:
                     and all(type(result[key]) is type(value) for key, value in RECOVERY_CAPABILITIES.items())):
                 self._recovery_capabilities = result
         return self._recovery_capabilities
+
+    def alerts_capabilities(self):
+        """Metadata-only probe; never infer alert support from recovery support."""
+        if not getattr(self, "_alerts_capabilities_checked", False):
+            self._alerts_capabilities_checked = True
+            self._alerts_capabilities = None
+            try:
+                result = self.call("alerts_capabilities", {})
+            except (NativeError, ValueError, OSError):
+                return None
+            if (isinstance(result, dict) and result == ALERTS_CAPABILITIES
+                    and all(type(result[key]) is type(value) for key, value in ALERTS_CAPABILITIES.items())):
+                self._alerts_capabilities = result
+        return self._alerts_capabilities
 
     def _wait_io(self, readers, writers, deadline):
         while True:

@@ -43,6 +43,9 @@ public final class Broker: @unchecked Sendable {
     }
     private func perform(_ op: String, arguments: JSON) throws -> JSON {
         switch op {
+        case "alerts_capabilities":
+            _ = try Arguments(arguments, allowed: [])
+            return .object(["version": .int(1), "alerts": .bool(true), "max_alerts": .int(10), "preview_version": .int(2)])
         case "recovery_capabilities":
             _ = try Arguments(arguments, allowed: [])
             return .object(["version": .int(1), "storage_version": .int(2), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(true), "max_selection": .int(25)])
@@ -138,8 +141,11 @@ public final class Broker: @unchecked Sendable {
                 after = .null
             } else {
                 guard let patch = a.values["fields"] else { throw CoreError("invalid_arguments", "Modify requires fields") }
-                after = try EventFields.merged(patch, with: record.fields).json
-                guard after != record.fields.json else { throw CoreError("no_change", "No event fields changed") }
+                let fields = try EventFields.merged(patch, with: record.fields)
+                after = fields.json
+                let sameAlerts = try fields.alerts.map { try EventAlert.matches($0, raw: record.details["alarms"] == .null ? .array([]) : record.details["alarms"]) } ?? true
+                guard fields.withoutAlerts != record.fields.withoutAlerts || !sameAlerts else { throw CoreError("no_change", "No event fields changed") }
+                if fields.alerts != nil && !sameAlerts { try validateRestorableAlarms(recoveryDetails(record.details)["alarms"]) }
                 if record.details["structured_location"] != .null && after["location"] != record.fields.json["location"] {
                     throw CoreError("unsupported_location", "Changing a structured location is unsupported; unrelated location data must be preserved")
                 }
@@ -147,7 +153,7 @@ public final class Broker: @unchecked Sendable {
         }
         let issued = now()
         let safety = try state.writeSafety(action: action, now: issued)
-        let envelope: JSON = .object(["version": .int(1), "nonce": .string(UUID().uuidString), "issued_at": .string(iso(issued)), "expires_at": .string(iso(issued.addingTimeInterval(600))), "installation_id": .string(try requiredMetadata("installation_id")), "credential_generation": .string(try requiredMetadata("credential_generation")), "key_id": .string(try requiredMetadata("key_id")), "action": .string(action), "scope": .string("this"), "calendar": calendar, "before": before, "after": after])
+        let envelope: JSON = .object(["version": .int(2), "nonce": .string(UUID().uuidString), "issued_at": .string(iso(issued)), "expires_at": .string(iso(issued.addingTimeInterval(600))), "installation_id": .string(try requiredMetadata("installation_id")), "credential_generation": .string(try requiredMetadata("credential_generation")), "key_id": .string(try requiredMetadata("key_id")), "action": .string(action), "scope": .string("this"), "calendar": calendar, "before": before, "after": after])
         guard try envelope.data().count <= 262_144 else { throw CoreError("preview_too_large", "Event review exceeds native preview limit") }
         let tag = HMAC<SHA256>.authenticationCode(for: try envelope.data(), using: try signingKey())
         return .object(["preview": .object(["envelope": envelope, "authentication_tag": .string(Data(tag).base64EncodedString())]), "safety": safety])
@@ -165,13 +171,15 @@ public final class Broker: @unchecked Sendable {
         var keys: Set<String> = ["version", "nonce", "issued_at", "expires_at", "installation_id", "credential_generation", "key_id", "action", "scope", "calendar", "before", "after"]
         if rollback { keys.insert("rollback") }
         let e = try Arguments(envelope, allowed: keys, required: keys)
-        guard try envelope.data().count <= 262_144, envelope["version"].integer == 1,
+        guard try envelope.data().count <= 262_144, [1, 2].contains(envelope["version"].integer ?? 0),
               let tag = Data(base64Encoded: try p.string("authentication_tag")), tag.count == 32,
               try e.string("installation_id") == requiredMetadata("installation_id"),
               try e.string("credential_generation") == requiredMetadata("credential_generation"),
               try e.string("key_id") == requiredMetadata("key_id"),
               HMAC<SHA256>.isValidAuthenticationCode(tag, authenticating: try envelope.data(), using: try signingKey()),
               try e.string("action") == action, try e.string("scope") == "this" else { throw CoreError("invalid_preview", "Preview integrity, binding or action validation failed") }
+        if envelope["version"] == .int(1), envelope["after"].object?["alerts"] != nil { throw CoreError("invalid_preview", "Legacy previews cannot contain alert directives") }
+        if envelope["version"] == .int(2), action == "create", !rollback, envelope["after"].object?["alerts"] == nil { throw CoreError("invalid_preview", "Create preview must specify the complete alert list") }
         let nonce = try e.string("nonce")
         guard UUID(uuidString: nonce) != nil else { throw CoreError("invalid_preview", "Invalid nonce") }
         if let prior = try state.execution(nonce) {
@@ -195,13 +203,18 @@ public final class Broker: @unchecked Sendable {
         if action == "delete", let existing { try checkRestorable(existing) }
         let fields = envelope["after"] == .null ? nil : try EventFields(json: envelope["after"])
         guard (action == "delete") == (fields == nil) else { throw CoreError("invalid_preview", "Action and after state disagree") }
-        if let fields { _ = try fields.dates() }
+        if let fields {
+            _ = try fields.dates()
+            if fields.alerts != nil, let existing { try validateRestorableAlarms(recoveryDetails(existing.details)["alarms"]) }
+        }
         let auditSequence = try state.claim(nonce: nonce, payload: envelope, now: current)
         let result: JSON
         do {
             let written: EventRecord?
             if rollback && action == "create", let fields {
                 written = try backend.restore(calendarID: pair.0.nativeID, fields: fields, details: envelope["rollback"]["restoration"]["details"], availability: envelope["rollback"]["restoration"]["availability"].string!)
+            } else if rollback && action == "modify", let existing, let fields, envelope["rollback"].object?["alarm_restoration"] != nil {
+                written = try backend.applyRestoringAlarms(calendarID: pair.0.nativeID, existing: existing, fields: fields, alarms: envelope["rollback"]["alarm_restoration"])
             } else { written = try backend.apply(action: action, calendarID: pair.0.nativeID, existing: existing, fields: fields) }
             if action == "delete" {
                 guard let existing else { throw CoreError("verification_failed", "Missing delete identity") }
@@ -211,9 +224,16 @@ public final class Broker: @unchecked Sendable {
             } else {
                 guard let written, let fields else { throw CoreError("verification_failed", "Write returned no event") }
                 let refreshed = try backend.get(nativeID: written.nativeID, calendarID: written.calendarNativeID, occurrence: written.occurrence, knownStart: parseDate(written.fields.start))
-                guard refreshed.fields == fields, refreshed.calendarNativeID == pair.0.nativeID else { throw CoreError("verification_failed", "Written event differs from preview") }
+                guard refreshed.fields.withoutAlerts == fields.withoutAlerts, refreshed.calendarNativeID == pair.0.nativeID else { throw CoreError("verification_failed", "Written event differs from preview") }
+                if rollback, let alarms = envelope["rollback"].object?["alarm_restoration"] {
+                    guard refreshed.details["alarms"] == alarms else { throw CoreError("verification_failed", "Restored alarms differ from the signed review") }
+                } else if let alerts = fields.alerts {
+                    guard try EventAlert.matches(alerts, raw: refreshed.details["alarms"]) else { throw CoreError("verification_failed", "Written alerts differ from preview") }
+                }
                 if let existing {
-                    for key in ["url", "alarms", "structured_location", "attendees", "organizer"] {
+                    var preservedKeys = ["url", "structured_location", "attendees", "organizer"]
+                    if fields.alerts == nil && envelope["rollback"].object?["alarm_restoration"] == nil { preservedKeys.append("alarms") }
+                    for key in preservedKeys {
                         guard refreshed.details[key] == existing.details[key] else { throw CoreError("verification_failed", "Unrelated event details changed during write") }
                     }
                     guard existing.recurring || existing.detached || refreshed.details["recurrence_rules"] == existing.details["recurrence_rules"] else { throw CoreError("verification_failed", "Unexpected recurrence change") }

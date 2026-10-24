@@ -14,7 +14,7 @@ import time
 import unittest
 
 from calendar_mcp.adapter import GatewayClient, run_stdio
-from calendar_mcp.native import NativeBroker, NativeError, RECOVERY_CAPABILITIES
+from calendar_mcp.native import ALERTS_CAPABILITIES, NativeBroker, NativeError, RECOVERY_CAPABILITIES
 from calendar_mcp.protocol import Protocol, VERSIONS, loads
 from calendar_mcp.schema import TOOLS, ValidationError, validate_arguments
 from calendar_mcp.security import initialize, read_token
@@ -171,6 +171,22 @@ class HTTPTests(unittest.TestCase):
             if method != "POST":
                 self.assertEqual(self.http(method)[0], 405)
         self.assertEqual(self.broker.calls, [])
+
+    def test_complete_alert_schema_discovery_survives_http_and_stdio_response_parsing(self):
+        class AlertBroker(FakeBroker):
+            def alerts_capabilities(self):
+                return dict(ALERTS_CAPABILITIES)
+        self.server.protocol = Protocol(AlertBroker())
+        wire = json.dumps(request("tools/list")).encode()
+        client = GatewayClient(self.state, self.port)
+        result = client.send(wire)
+        self.assertEqual(result["result"]["tools"], TOOLS)
+        sink = io.BytesIO()
+        self.assertEqual(run_stdio(client, io.BytesIO(wire + b"\n"), sink), 0)
+        self.assertEqual(json.loads(sink.getvalue())["result"]["tools"], TOOLS)
+        # The expanded response allowance must not relax incoming requests.
+        with self.assertRaises(ValueError):
+            loads("[" * 21 + "1" + "]" * 21)
 
     def test_host_origin_path_and_protocol_fail_closed(self):
         for headers, expected in [({"Host": "evil.example"}, 403), ({"Host": "localhost:" + str(self.port)}, 403),

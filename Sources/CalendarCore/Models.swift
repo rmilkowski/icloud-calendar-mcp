@@ -35,20 +35,26 @@ public struct EventFields: Equatable, Sendable {
     public var timeZone: String?
     public var allDay: Bool
     public var location: String, notes: String
-    public init(title: String, start: String, end: String, timeZone: String?, allDay: Bool, location: String = "", notes: String = "") {
+    public var alerts: [EventAlert]?
+    public init(title: String, start: String, end: String, timeZone: String?, allDay: Bool, location: String = "", notes: String = "", alerts: [EventAlert]? = nil) {
         self.title = title; self.start = start; self.end = end; self.timeZone = timeZone
-        self.allDay = allDay; self.location = location; self.notes = notes
+        self.allDay = allDay; self.location = location; self.notes = notes; self.alerts = alerts
     }
-    public var json: JSON { .object([
+    public var json: JSON {
+        var values: [String: JSON] = [
         "title": .string(title), "start": .string(start), "end": .string(end), "time_zone": .optional(timeZone),
         "all_day": .bool(allDay), "location": .string(location), "notes": .string(notes)
-    ]) }
+        ]
+        if let alerts { values["alerts"] = .array(alerts.map(\.json)) }
+        return .object(values)
+    }
+    public var withoutAlerts: EventFields { var copy = self; copy.alerts = nil; return copy }
     public init(json: JSON) throws {
-        let a = try Arguments(json, allowed: ["title", "start", "end", "time_zone", "all_day", "location", "notes"], required: ["title", "start", "end", "time_zone", "all_day", "location", "notes"])
+        let a = try Arguments(json, allowed: ["title", "start", "end", "time_zone", "all_day", "location", "notes", "alerts"], required: ["title", "start", "end", "time_zone", "all_day", "location", "notes"])
         guard let title = a.values["title"]?.string, let location = a.values["location"]?.string,
               let notes = a.values["notes"]?.string, let allDay = a.values["all_day"]?.boolean,
               a.values["time_zone"] == .null || a.values["time_zone"]?.string != nil else { throw CoreError("invalid_arguments", "Invalid event fields") }
-        self.init(title: title, start: try a.string("start"), end: try a.string("end"), timeZone: a.values["time_zone"]?.string, allDay: allDay, location: location, notes: notes)
+        self.init(title: title, start: try a.string("start"), end: try a.string("end"), timeZone: a.values["time_zone"]?.string, allDay: allDay, location: location, notes: notes, alerts: try a.values["alerts"].map(EventAlert.parse))
     }
     public func dates() throws -> (Date, Date, TimeZone?) {
         let zone = timeZone.flatMap(TimeZone.init(identifier:))
@@ -85,13 +91,13 @@ public struct EventFields: Equatable, Sendable {
     }
     public func normalized() throws -> EventFields {
         let (a, b, _) = try dates()
-        return EventFields(title: title, start: iso(a), end: iso(b), timeZone: timeZone, allDay: allDay, location: location, notes: notes)
+        return EventFields(title: title, start: iso(a), end: iso(b), timeZone: timeZone, allDay: allDay, location: location, notes: notes, alerts: alerts)
     }
     public static func merged(_ patch: JSON, with existing: EventFields?) throws -> EventFields {
-        let allowed: Set<String> = ["title", "start", "end", "time_zone", "all_day", "location", "notes"]
+        let allowed: Set<String> = ["title", "start", "end", "time_zone", "all_day", "location", "notes", "alerts"]
         let a = try Arguments(patch, allowed: allowed)
         guard !a.values.isEmpty else { throw CoreError("invalid_arguments", "At least one field is required") }
-        var values = existing?.json.object ?? ["time_zone": .string("Europe/London"), "all_day": .bool(false), "location": .string(""), "notes": .string("")]
+        var values = existing?.json.object ?? ["time_zone": .string("Europe/London"), "all_day": .bool(false), "location": .string(""), "notes": .string(""), "alerts": .array([])]
         values.merge(a.values) { _, new in new }
         if let existing, existing.timeZone == nil, values["time_zone"] != .null {
             throw CoreError("unsupported_timezone", "Existing nil timezone semantics must be preserved")
@@ -119,7 +125,7 @@ public struct EventRecord: Equatable {
     /// Deterministic structured snapshot of every additional supported EventKit property.
     public var details: JSON
     public init(nativeID: String, calendarNativeID: String, occurrence: String? = nil, fields: EventFields, recurring: Bool = false, detached: Bool = false, hasAttendees: Bool = false, hasOrganizer: Bool = false, availability: String = "busy", status: String = "confirmed", details: JSON = .object([:])) {
-        self.nativeID = nativeID; self.calendarNativeID = calendarNativeID; self.occurrence = occurrence; self.fields = fields
+        self.nativeID = nativeID; self.calendarNativeID = calendarNativeID; self.occurrence = occurrence; self.fields = fields.withoutAlerts
         self.recurring = recurring; self.detached = detached; self.hasAttendees = hasAttendees; self.hasOrganizer = hasOrganizer
         self.availability = availability; self.status = status; self.details = details
     }
@@ -136,11 +142,15 @@ public protocol CalendarBackend: AnyObject {
     func query(start: Date, end: Date, calendarIDs: [String]) throws -> [EventRecord]
     func get(nativeID: String, calendarID: String, occurrence: String?, knownStart: Date) throws -> EventRecord
     func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord
+    func applyRestoringAlarms(calendarID: String, existing: EventRecord, fields: EventFields, alarms: JSON) throws -> EventRecord?
     /// Any error after entering this method is conservatively an unknown outcome.
     func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord?
 }
 
 public extension CalendarBackend {
+    func applyRestoringAlarms(calendarID: String, existing: EventRecord, fields: EventFields, alarms: JSON) throws -> EventRecord? {
+        throw CoreError("unsupported_restore", "Backend cannot restore retained alarms")
+    }
     func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
         throw CoreError("unsupported_restore", "Backend cannot restore retained event details")
     }
@@ -169,20 +179,26 @@ public final class SyntheticBackend: CalendarBackend {
     }
     public func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
         writeCount += 1
-        let event = EventRecord(nativeID: UUID().uuidString, calendarNativeID: calendarID, fields: fields, availability: availability, details: details)
+        let event = EventRecord(nativeID: UUID().uuidString, calendarNativeID: calendarID, fields: fields.withoutAlerts, availability: availability, details: details)
         events.append(event)
         if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-write failure") }
         return event
+    }
+    public func applyRestoringAlarms(calendarID: String, existing: EventRecord, fields: EventFields, alarms: JSON) throws -> EventRecord? {
+        _ = try apply(action: "modify", calendarID: calendarID, existing: existing, fields: fields.withoutAlerts)
+        let index = events.firstIndex { $0.nativeID == existing.nativeID && $0.occurrence == existing.occurrence }!
+        var details = events[index].details.object ?? [:]; details["alarms"] = alarms; events[index].details = .object(details)
+        return events[index]
     }
     public func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord? {
         writeCount += 1
         let result: EventRecord?
         if action == "create", let fields {
-            let event = EventRecord(nativeID: UUID().uuidString, calendarNativeID: calendarID, fields: fields); events.append(event); result = event
+            let event = EventRecord(nativeID: UUID().uuidString, calendarNativeID: calendarID, fields: fields.withoutAlerts, details: fields.alerts.map { .object(["alarms": .array($0.map(\.rawAlarm))]) } ?? .object([:])); events.append(event); result = event
         } else {
             guard let existing, let index = events.firstIndex(where: { $0.nativeID == existing.nativeID && $0.occurrence == existing.occurrence }) else { throw CoreError("event_missing", "Event missing during write") }
             if action == "delete" { events.remove(at: index); result = nil }
-            else { guard let fields else { throw CoreError("invalid_fields", "Missing fields") }; events[index].fields = fields; result = events[index] }
+            else { guard let fields else { throw CoreError("invalid_fields", "Missing fields") }; events[index].fields = fields.withoutAlerts; if let alerts = fields.alerts { var details = events[index].details.object ?? [:]; details["alarms"] = .array(alerts.map(\.rawAlarm)); events[index].details = .object(details) }; result = events[index] }
         }
         if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-write failure") }; return result
     }

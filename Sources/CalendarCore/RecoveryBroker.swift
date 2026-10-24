@@ -17,22 +17,26 @@ extension Broker {
         guard ["free", "busy", "tentative", "unavailable", "unknown"].contains(record.availability) else { throw CoreError("unsupported_restore", "Unsupported event availability") }
         let details = recoveryDetails(record.details)
         if details["url"] != .null { guard let text = details["url"].string, URL(string: text) != nil else { throw CoreError("unsupported_restore", "Invalid event URL") } }
-        func location(_ value: JSON) throws {
-            if value == .null { return }
-            guard let object = value.object, Set(object.keys).isSubset(of: ["title", "radius", "latitude", "longitude"]), value["title"] == .null || value["title"].string != nil,
-                  let radius = value["radius"].string.flatMap(Double.init), radius.isFinite, radius >= 0 else { throw CoreError("unsupported_restore", "Unsupported structured location") }
-            if value["latitude"] != .null || value["longitude"] != .null {
-                guard let latitude = value["latitude"].string.flatMap(Double.init), let longitude = value["longitude"].string.flatMap(Double.init), latitude.isFinite, longitude.isFinite, (-90...90).contains(latitude), (-180...180).contains(longitude) else { throw CoreError("unsupported_restore", "Unsupported geographic location") }
-            }
+        try validateRestorableLocation(details["structured_location"])
+        try validateRestorableAlarms(details["alarms"])
+    }
+    func validateRestorableLocation(_ value: JSON) throws {
+        if value == .null { return }
+        guard let object = value.object, Set(object.keys).isSubset(of: ["title", "radius", "latitude", "longitude"]), value["title"] == .null || value["title"].string != nil,
+              let radius = value["radius"].string.flatMap(Double.init), radius.isFinite, radius >= 0 else { throw CoreError("unsupported_restore", "Unsupported structured location") }
+        if value["latitude"] != .null || value["longitude"] != .null {
+            guard let latitude = value["latitude"].string.flatMap(Double.init), let longitude = value["longitude"].string.flatMap(Double.init), latitude.isFinite, longitude.isFinite, (-90...90).contains(latitude), (-180...180).contains(longitude) else { throw CoreError("unsupported_restore", "Unsupported geographic location") }
         }
-        try location(details["structured_location"])
-        for alarm in details["alarms"].array! {
+    }
+    func validateRestorableAlarms(_ raw: JSON) throws {
+        guard let alarms = raw.array else { throw CoreError("unsupported_restore", "Retained alarms must be an array") }
+        for alarm in alarms {
             guard let type = alarm["type"].integer, [0, 1].contains(type), let proximity = alarm["proximity"].integer, (0...2).contains(proximity), let offset = alarm["relative_offset"].string.flatMap(Double.init), offset.isFinite,
                   alarm["email_address"] == .null, alarm["sound_name"] == .null || alarm["sound_name"].string != nil else { throw CoreError("unsupported_restore", "Unsupported retained alarm") }
             guard (type == 0 && alarm["sound_name"] == .null) || (type == 1 && alarm["sound_name"].string != nil) else { throw CoreError("unsupported_restore", "Alarm type and sound do not form a restorable alarm") }
             if let date = alarm["absolute_date"].string { _ = try parseDate(date) }
             else if alarm["absolute_date"] != .null { throw CoreError("unsupported_restore", "Invalid absolute alarm date") }
-            try location(alarm["structured_location"])
+            try validateRestorableLocation(alarm["structured_location"])
         }
     }
     public func maintainRecoveryDetails() -> JSON {
@@ -162,7 +166,7 @@ extension Broker {
             guard action == "delete" || previousAfter != .null else { throw CoreError("rollback_history_gap", "Verified observed state is unavailable") }
         }
     }
-    func rollbackStep(_ sources: [[String]], selectionID: String) throws -> JSON {
+    func rollbackStep(_ sources: [[String]], selectionID: String, validateAlarmRestoration: Bool = true) throws -> JSON {
         guard let first = sources.first, let last = sources.last, sources.count <= 25 else { throw CoreError("invalid_selection", "Empty rollback group") }
         let held = try state.recoveryHeldNonces()
         for row in sources { guard try changeSummary(row, held: held)["recovery_eligible"] == .bool(true) else { throw CoreError("rollback_ineligible", "A selected change is expired, unverified, consumed or unsupported") } }
@@ -195,14 +199,15 @@ extension Broker {
         }
         try checkWritable(calendar)
         let fields = try EventFields(json: desired["fields"]); _ = try fields.dates()
+        if validateAlarmRestoration { try validateRestorableAlarms(recoveryDetails(desired["details"])["alarms"]) }
         let issued = now(), expiry = try sources.map { try parseDate($0[5]) }.min()!
         guard expiry > issued else { throw CoreError("rollback_ineligible", "A selected source has expired") }
         var limitations: [JSON] = action == "create" ? [.string("Restoration creates a new provider event. Provider IDs, creation/modification timestamps and read-only status are not restored.")] : []
         if action == "modify" && [desired["recurring"], desired["detached"], before["recurring"], before["detached"]].contains(.bool(true)) {
             limitations.append(.string("Restores the displayed fields while preserving the current occurrence and series structure. Historical detachment and series membership are not restored."))
         }
-        let rollback: JSON = .object(["selection_id": .string(selectionID), "source_change_ids": .array(sources.map { .string($0[0]) }), "source_digest": .string(try sourceDigest(sources)), "restoration": restoration, "limitations": .array(limitations)])
-        let envelope: JSON = .object(["version": .int(1), "nonce": .string(UUID().uuidString), "issued_at": .string(iso(issued)), "expires_at": .string(iso(min(issued.addingTimeInterval(600), expiry))), "installation_id": .string(try requiredMetadata("installation_id")), "credential_generation": .string(try requiredMetadata("credential_generation")), "key_id": .string(try requiredMetadata("key_id")), "action": .string(action), "scope": .string("this"), "calendar": calendar, "before": before, "after": fields.json, "rollback": rollback])
+        let rollback: JSON = .object(["alarm_restoration": recoveryDetails(desired["details"])["alarms"], "selection_id": .string(selectionID), "source_change_ids": .array(sources.map { .string($0[0]) }), "source_digest": .string(try sourceDigest(sources)), "restoration": restoration, "limitations": .array(limitations)])
+        let envelope: JSON = .object(["version": .int(2), "nonce": .string(UUID().uuidString), "issued_at": .string(iso(issued)), "expires_at": .string(iso(min(issued.addingTimeInterval(600), expiry))), "installation_id": .string(try requiredMetadata("installation_id")), "credential_generation": .string(try requiredMetadata("credential_generation")), "key_id": .string(try requiredMetadata("key_id")), "action": .string(action), "scope": .string("this"), "calendar": calendar, "before": before, "after": fields.json, "rollback": rollback])
         guard try envelope.data().count <= 262_144 else { throw CoreError("preview_too_large", "Rollback review is too large") }
         let tag = HMAC<SHA256>.authenticationCode(for: try envelope.data(), using: try signingKey())
         _ = last
@@ -219,11 +224,16 @@ extension Broker {
         return result
     }
     func validateRollback(_ envelope: JSON) throws {
-        let r = try Arguments(envelope["rollback"], allowed: ["selection_id", "source_change_ids", "source_digest", "restoration", "limitations"], required: ["selection_id", "source_change_ids", "source_digest", "restoration", "limitations"])
+        var rollbackKeys: Set<String> = ["selection_id", "source_change_ids", "source_digest", "restoration", "limitations"]
+        if envelope["version"] == .int(2) { rollbackKeys.insert("alarm_restoration") }
+        let r = try Arguments(envelope["rollback"], allowed: rollbackKeys, required: rollbackKeys)
         let selection = try r.string("selection_id")
         guard UUID(uuidString: selection) != nil else { throw CoreError("invalid_preview", "Invalid selection identity") }
         let rows = try selectedRows(.object(["change_ids": envelope["rollback"]["source_change_ids"]]))
-        let expected = try rollbackStep(rows, selectionID: selection)["preview"]["envelope"]
+        var expected = try rollbackStep(rows, selectionID: selection, validateAlarmRestoration: envelope["version"] == .int(2))["preview"]["envelope"]
+        if envelope["version"] == .int(1) {
+            var value = expected.object!, rollback = expected["rollback"].object!; rollback.removeValue(forKey: "alarm_restoration"); value["rollback"] = .object(rollback); expected = .object(value)
+        }
         for key in ["action", "calendar", "before", "after", "rollback"] { guard envelope[key] == expected[key] else { throw CoreError("stale_rollback", "Rollback sources, lineage or current event changed; request a new review") } }
     }
     /// Only the resident native control calls this entry point with the preview it displayed.
