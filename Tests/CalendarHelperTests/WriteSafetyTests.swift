@@ -63,9 +63,10 @@ final class WriteSafetyTests: XCTestCase {
         XCTAssertEqual(commit(broker, denied)["error"]["code"], .string("write_safety_limit"))
         XCTAssertNil(try state.execution(denied["result"]["preview"]["envelope"]["nonce"].string!))
         XCTAssertEqual(backend.writeCount, 50)
-        let rejection = try state.auditRecords().first { $0["event"] == .string("write_safety_rejected") }
-        XCTAssertEqual(rejection?["payload"]["safety"]["usage"]["delete_hour"]["used"], .int(50))
-        XCTAssertNotNil(rejection?["payload"]["policy_revision"].string)
+        XCTAssertFalse(try state.auditRecords().contains { $0["event"] == .string("write_safety_rejected") })
+        let rejection = try state.commitObservationStatus()["observations"].array!.first { $0["reason"] == .string("write_safety_limit") }
+        XCTAssertEqual(rejection?["kind"], .string("rejected")); XCTAssertEqual(rejection?["count"], .int(1))
+        XCTAssertEqual(rejection?["pending_count"], .int(1))
         try state.verifyAudit()
     }
 

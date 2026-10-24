@@ -206,7 +206,9 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(backend.writeCount, 3); XCTAssertEqual(backend.events.count, 0)
         try store.verifyAudit(); let records = try store.auditRecords()
         XCTAssertEqual(records.filter { $0["event"] == .string("write_intent") }.count, 3)
-        XCTAssertTrue(records.contains { $0["event"] == .string("commit_replayed") })
+        XCTAssertFalse(records.contains { $0["event"] == .string("commit_replayed") })
+        let replayCounts = try store.commitObservationStatus()["observations"].array!.filter { $0["kind"] == .string("replayed") }
+        XCTAssertEqual(replayCounts.reduce(0) { $0 + $1["count"].integer! }, 2)
     }
     func testTamperExpiryActionAndCredentialBinding() throws {
         let clock = Clock(), store = try state(), backend = SyntheticBackend()
@@ -245,7 +247,9 @@ final class ModelsTests: XCTestCase {
         _ = try store.reconcile(nonce: nonce, outcome: "applied", evidence: "Synthetic backend inspected: one exact event exists")
         XCTAssertEqual(commit(broker, pending)["result"]["state"], .string("reconciled")); XCTAssertEqual(backend.writeCount, 1)
         XCTAssertFalse(try store.hasUnresolved())
-        XCTAssertEqual(try store.auditRecords().last?["approval_source"], .string("chatgpt_host_policy")) // replay provenance
+        XCTAssertEqual(try store.auditRecords().last?["approval_source"], .string("local_operator_attestation"))
+        let replay = try store.commitObservationStatus()["observations"].array!.first { $0["kind"] == .string("replayed") }
+        XCTAssertEqual(replay?["origin"], .string("chatgpt_host_policy")); XCTAssertEqual(replay?["count"], .int(2))
     }
     func testStrandedIntentRecoveredWithoutWrite() throws {
         let dir = directory(); var nonce = ""

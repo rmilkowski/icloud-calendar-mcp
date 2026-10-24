@@ -25,7 +25,7 @@ public final class Broker: @unchecked Sendable {
         } catch {
             var failure = error as? CoreError ?? CoreError("native_error", "Native operation failed safely")
             if request["op"].string?.hasPrefix("commit_") == true {
-                do { try state.append(event: "commit_rejected", nonce: nil, payload: .object(["op": request["op"], "code": .string(failure.code)])) }
+                do { try state.recordCommitObservation(replayed: false, operation: request["op"].string ?? "", code: failure.code, now: now()) }
                 catch { failure = CoreError("audit_unavailable", "Cannot durably audit rejected commit; no new write allowed") }
             }
             return .object(["error": .object(["code": .string(failure.code), "message": .string(failure.message)])])
@@ -54,6 +54,9 @@ public final class Broker: @unchecked Sendable {
         case "alerts_capabilities":
             _ = try Arguments(arguments, allowed: [])
             return .object(["version": .int(1), "alerts": .bool(true), "max_alerts": .int(10), "preview_version": .int(2)])
+        case "commit_observation_status":
+            _ = try Arguments(arguments, allowed: [])
+            return try state.commitObservationStatus()
         case "recovery_capabilities":
             _ = try Arguments(arguments, allowed: [])
             return .object(["version": .int(1), "storage_version": .int(2), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
@@ -201,7 +204,7 @@ public final class Broker: @unchecked Sendable {
         guard UUID(uuidString: nonce) != nil else { throw CoreError("invalid_preview", "Invalid nonce") }
         if let prior = try state.execution(nonce) {
             guard try state.payloadMatches(nonce: nonce, payload: envelope) else { throw CoreError("nonce_conflict", "Nonce payload differs from recorded execution") }
-            try state.append(event: "commit_replayed", nonce: nonce, payload: prior.result)
+            try state.recordCommitObservation(replayed: true, operation: rollback ? "commit_rollback" : "commit_" + action, now: now())
             return prior.result
         }
         let issued = try parseDate(e.string("issued_at")), expiry = try parseDate(e.string("expires_at")), current = now()

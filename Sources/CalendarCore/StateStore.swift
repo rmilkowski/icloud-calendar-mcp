@@ -49,6 +49,8 @@ public final class StateStore {
                 try rotateCredentialsInsideTransaction()
             }
         }
+        try installCommitObservationStorage()
+        try execute("CREATE INDEX IF NOT EXISTS executions_state ON executions(state)")
         try migrateRecoveryStorage()
         try verifyAudit()
         try transaction {
@@ -228,7 +230,6 @@ public final class StateStore {
                 let accounting: JSON = .object(["safety": snapshot.json, "policy_revision": .string(try metadata("write_safety_revision") ?? "")])
                 // Keep accepted configuration and its audit even when quota denies a new intent.
                 if let rejection = snapshot.rejection {
-                    _ = try appendInsideTransaction(event: "write_safety_rejected", nonce: nonce, payload: accounting)
                     return (nil, rejection)
                 }
                 try execute("INSERT INTO write_safety_claims(nonce,action,charged_at) VALUES(?,?,?)", [nonce, action, snapshot.json["effective_at"].string!])
@@ -261,7 +262,7 @@ public final class StateStore {
         let last = try rows("SELECT sequence,hash FROM audit ORDER BY sequence DESC LIMIT 1").first
         let sequence = (last.flatMap { Int($0[0]) } ?? 0) + 1
         let previous = last?[1] ?? String(repeating: "0", count: 64)
-        let origin = ["recovery_migration_checkpoint", "details_expired"].contains(event) ? "native_maintenance" : (event == "operator_reconciliation" ? "local_operator_attestation" : (event.contains("credential") || event == "write_safety_policy_changed" ? "local_configuration" : (event == "recovered_unknown" ? "native_recovery" : "chatgpt_host_policy")))
+        let origin = ["recovery_migration_checkpoint", "details_expired", "commit_observation_checkpoint"].contains(event) ? "native_maintenance" : (event == "operator_reconciliation" ? "local_operator_attestation" : (event.contains("credential") || event == "write_safety_policy_changed" ? "local_configuration" : (event == "recovered_unknown" ? "native_recovery" : "chatgpt_host_policy")))
         let localWriteEvent = localNativeReview && ["write_intent", "write_applied", "write_unknown", "commit_replayed", "commit_rejected", "write_safety_charged", "write_safety_rejected"].contains(event)
         let body: JSON = .object(["version": .int(2), "record_sequence": .int(sequence), "event_id": .string(UUID().uuidString), "timestamp": .string(iso(Date())), "event": .string(event), "nonce": .optional(nonce), "approval_source": .string(localWriteEvent ? "local_native_ui" : origin), "approval_evidence": .string(localWriteEvent ? "native_control_activated" : "not_provided"), "payload": safeAuditPayload(event: event, nonce: nonce, payload: payload)])
         let hash = digest(Data(previous.utf8) + (try body.data()))

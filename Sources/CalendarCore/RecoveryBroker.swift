@@ -41,7 +41,7 @@ extension Broker {
     }
     public func maintainRecoveryDetails() -> JSON {
         lock.lock(); defer { lock.unlock() }
-        do { try state.expireRecoveryDetails(now: now()); return .object(["maintained": .bool(true)]) }
+        do { try state.expireRecoveryDetails(now: now()); try state.maintainCommitObservations(now: now()); return .object(["maintained": .bool(true)]) }
         catch { return .object(["maintained": .bool(false)]) }
     }
     func changeSummary(_ row: [String], held suppliedHeld: Set<String>? = nil) throws -> JSON {
@@ -251,7 +251,7 @@ extension Broker {
             return .object(["result": try commit(.object(["preview": preview]), action: action, rollback: true)])
         } catch {
             let e = error as? CoreError ?? CoreError("native_error", "Native rollback failed safely")
-            do { try state.append(event: "commit_rejected", nonce: nil, payload: .object(["op": .string("commit_rollback"), "code": .string(e.code)])) }
+            do { try state.recordCommitObservation(replayed: false, operation: "commit_rollback", code: e.code, now: now()) }
             catch { return .object(["error": .object(["code": .string("audit_unavailable"), "message": .string("Cannot durably record rejected rollback")])]) }
             return .object(["error": .object(["code": .string(e.code), "message": .string(e.message)])])
         }

@@ -76,7 +76,7 @@ extension StateStore {
         }
     }
     func safeAuditPayload(event: String, nonce: String?, payload: JSON) -> JSON {
-        if event.hasPrefix("write_safety_") || event.contains("credential") || event == "recovery_migration_checkpoint" || event == "details_expired" { return payload }
+        if event.hasPrefix("write_safety_") || event.contains("credential") || event == "recovery_migration_checkpoint" || event == "details_expired" || event == "commit_observation_checkpoint" { return payload }
         var result: [String: JSON] = [:]
         for key in ["storage_version", "state", "action", "audit_sequence", "code", "op", "outcome", "rollback_of", "event_id", "parent_nonce", "stopped_reason"] where payload[key] != .null { result[key] = payload[key] }
         if let nonce { result["detail_reference"] = .string(nonce) }
@@ -84,11 +84,16 @@ extension StateStore {
         return .object(result)
     }
     func recoveryHeldNonces() throws -> Set<String> {
-        let rows = try self.rows("SELECT nonce,payload,state FROM executions")
-        let markers = try Dictionary(uniqueKeysWithValues: rows.map { ($0[0], try JSON.parse(Data($0[1].utf8))) })
-        var pinned = Set(rows.filter { ["intent_recorded", "unknown"].contains($0[2]) }.map { $0[0] }), pending = Array(pinned)
-        while let nonce = pending.popLast() {
-            for source in markers[nonce]?["rollback_of"].array?.compactMap(\.string) ?? [] where pinned.insert(source).inserted { pending.append(source) }
+        // Start with indexed unresolved executions; fetch only their transitive
+        // rollback ancestors by primary key, never decode resolved history.
+        let unresolved = try rows("SELECT nonce,payload FROM executions WHERE state IN ('intent_recorded','unknown')")
+        var pinned = Set(unresolved.map { $0[0] }), pending = unresolved
+        while let row = pending.popLast() {
+            let marker = try JSON.parse(Data(row[1].utf8))
+            for source in marker["rollback_of"].array?.compactMap(\.string) ?? [] where pinned.insert(source).inserted {
+                guard let ancestor = try rows("SELECT nonce,payload FROM executions WHERE nonce=?", [source]).first else { throw CoreError("state_corrupt", "Missing unresolved rollback ancestor") }
+                pending.append(ancestor)
+            }
         }
         return pinned
     }
@@ -96,6 +101,7 @@ extension StateStore {
         try transaction {
             let previous = try metadata("recovery_clock_highwater").map(parseDate), effective = max(now, previous ?? now)
             try execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('recovery_clock_highwater',?)", [iso(effective)])
+            guard !(try rows("SELECT nonce FROM execution_details WHERE expired=0 AND expires<=? LIMIT 1", [iso(effective)])).isEmpty else { return }
             let pinned = try recoveryHeldNonces()
             for row in try rows("SELECT nonce,expires FROM execution_details WHERE expired=0 AND expires<=?", [iso(effective)]) where !pinned.contains(row[0]) {
                 try execute("DELETE FROM execution_keys WHERE nonce=?", [row[0]])
@@ -111,6 +117,7 @@ extension StateStore {
     func migrateRecoveryStorage() throws {
         if let version = try metadata("recovery_storage_version"), version != "2" { throw CoreError("state_version", "Unsupported recovery storage version") }
         try execute("CREATE TABLE IF NOT EXISTS execution_details(nonce TEXT PRIMARY KEY,payload_cipher TEXT NOT NULL,result_cipher TEXT NOT NULL,captured TEXT NOT NULL,expires TEXT NOT NULL,expired INTEGER NOT NULL CHECK(expired IN (0,1)))")
+        try execute("CREATE INDEX IF NOT EXISTS execution_details_expiry ON execution_details(expired,expires)")
         try execute("CREATE TABLE IF NOT EXISTS execution_keys(nonce TEXT PRIMARY KEY,key TEXT NOT NULL)")
         try execute("CREATE TABLE IF NOT EXISTS recovery_links(source_nonce TEXT PRIMARY KEY,rollback_nonce TEXT NOT NULL)")
         try execute("CREATE TABLE IF NOT EXISTS legacy_audit_details(sequence INTEGER PRIMARY KEY,nonce TEXT NOT NULL,cipher TEXT NOT NULL)")
