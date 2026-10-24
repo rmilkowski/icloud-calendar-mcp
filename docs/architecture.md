@@ -122,6 +122,14 @@ Service registration is explicit and opt-in: `service render` stages configurati
 
 A gateway or broker restart never resubmits a Calendar request. Native startup preserves consumed nonces and marks interrupted durable intent conservatively unknown. An unresolved write continues to block new writes until evidence-based local reconciliation. The service does not turn availability recovery into write recovery or a new consent surface.
 
+## Calendar container deletion prohibition
+
+Deleting a calendar container is a permanent, non-configurable prohibition for this integration, including future providers and local tooling. No confirmation, write-safety policy change or recovery operation can enable it. Individually authorized event deletions remain supported within the existing quotas; those deletions can empty a calendar while leaving its container intact.
+
+The existing public tool/action allowlists and native operation allowlist expose no calendar-removal operation. Delete preflight requires one opaque event identity, rejects `calendar_id` and accepts only `scope: this`; native identity resolution distinguishes calendar identities from event identities. Commit authenticates and independently checks the exact action and scope, resolves the signed before-event identity, and journals that event change. Recovery writes are create/modify only. The EventKit deletion boundary accepts an `EKEvent` with `.thisEvent`, with no calendar-removal call.
+
+Verified on 24 October 2026 with seven synthetic Python schema/protocol tests and a focused native regression test built in an isolated temporary directory. Container deletion requests fail before dispatch or native mutation; calendar identities and wildcard event identities cannot become deletion targets. Even authentically signed envelopes with a widened action/scope are rejected without a durable write intent. Exact individual event deletion succeeds and preserves the calendar container. These checks required no runtime change, deployment, service restart or real Calendar access.
+
 ## MCP tools
 
 The original nine tools are implemented and published by `calendar_mcp/schema.py`; four recovery tools are additionally published only for a capability-verified upgraded helper. Read tools use `readOnlyHint: true`. All tools use `openWorldHint: false` because they operate within the bounded configured calendar account set, with no arbitrary recipients, invitations or public publishing. Provider synchronization alone does not change that scope.

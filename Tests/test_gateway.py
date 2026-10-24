@@ -103,6 +103,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(result["isError"])
         self.assertNotIn("structuredContent", result)
 
+    def test_calendar_deletion_requests_never_dispatch(self):
+        calls = [
+            ("delete_calendar", {"calendar_id": "calendar"}),
+            ("commit_delete_calendar", {"calendar_id": "calendar"}),
+            ("preflight_change", {"action": "delete_calendar", "scope": "this", "calendar_id": "calendar"}),
+            ("preflight_change", {"action": "delete", "scope": "this", "calendar_id": "calendar"}),
+            ("preflight_change", {"action": "delete", "scope": "this", "calendar_id": "calendar", "event_id": "event"}),
+            ("preflight_change", {"action": "delete", "scope": "all", "event_id": "event"}),
+        ]
+        for name, arguments in calls:
+            with self.subTest(name=name, arguments=arguments):
+                response = self.protocol.handle(request("tools/call", {"name": name, "arguments": arguments}))
+                self.assertEqual(response["error"]["code"], -32602)
+        self.assertEqual(self.broker.calls, [])
+
 
 class CredentialTests(unittest.TestCase):
     def test_credential_init_permissions_reuse_no_echo(self):

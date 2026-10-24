@@ -1,5 +1,7 @@
 # Private Calendar MCP
 
+Deleting an entire calendar container is permanently disabled, with no configuration or approval override. `commit_delete` can delete only one identified event or occurrence from its signed preview. Individually authorized event deletions remain subject to the normal consent and quota checks.
+
 A personal macOS Calendar integration with a Swift EventKit broker, a dependency-free Python MCP gateway and a stdio adapter for local clients or an official private Secure MCP Tunnel. It uses the calendars already configured in macOS, including iCloud; no iCloud password is collected.
 
 Calendar changes use two steps: `preflight_change` returns the complete signed before/after preview, then `commit_create`, `commit_modify` or `commit_delete` receives that entire preview through the host's normal confirmation policy. The native broker checks identity and freshness and journals the exact payload before one mutation attempt. There is no Terminal approval prompt, approval endpoint or caller-controlled approval flag. Host policy is not proof of a fresh human click.

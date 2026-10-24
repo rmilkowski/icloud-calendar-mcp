@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import CryptoKit
 import CSQLite
 import Darwin
 @testable import CalendarCore
@@ -146,6 +147,46 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(call(broker, "apply")["error"]["code"], .string("unknown_operation"))
         let response = call(broker, "preflight_change", ["action": .string("create"), "scope": .string("this"), "calendar_id": calendarID(broker), "fields": .object(["title": .string("X"), "start": .string("2026-10-25T10:00:00Z"), "end": .string("2026-10-25T11:00:00Z"), "attendees": .array([])])])
         XCTAssertEqual(response["error"]["code"], .string("invalid_arguments")); XCTAssertEqual(backend.writeCount, 0)
+    }
+    func testCalendarDeletionIsUnavailableWhileIndividualEventDeletionWorks() throws {
+        let fields = EventFields(title: "Retained fixture", start: "2026-10-25T10:00:00Z", end: "2026-10-25T11:00:00Z", timeZone: "Europe/London", allDay: false)
+        let backend = SyntheticBackend(events: [EventRecord(nativeID: "fixture", calendarNativeID: "synthetic-calendar", fields: fields)])
+        let store = try state(), broker = Broker(state: store, backend: backend)
+        let calendars = call(broker, "list_calendars")["result"]["calendars"]
+        let calendar = calendars.array!.first!["id"]
+        let query = call(broker, "query_events", ["start": .string("2026-10-25T00:00:00Z"), "end": .string("2026-10-26T00:00:00Z")])
+        let event = query["result"]["events"].array!.first!["id"]
+        let rejected: [(String, [String: JSON], String)] = [
+            ("delete_calendar", ["calendar_id": calendar], "unknown_operation"),
+            ("commit_delete_calendar", ["calendar_id": calendar], "unknown_operation"),
+            ("preflight_change", ["action": .string("delete_calendar"), "scope": .string("this"), "calendar_id": calendar], "unsupported_scope"),
+            ("preflight_change", ["action": .string("delete"), "scope": .string("this"), "calendar_id": calendar], "invalid_arguments"),
+            ("preflight_change", ["action": .string("delete"), "scope": .string("this"), "calendar_id": calendar, "event_id": event], "invalid_arguments"),
+            ("preflight_change", ["action": .string("delete"), "scope": .string("this"), "event_id": calendar], "identity_missing"),
+            ("preflight_change", ["action": .string("delete"), "scope": .string("this"), "event_id": .string("*")], "identity_missing"),
+            ("preflight_change", ["action": .string("delete"), "scope": .string("all"), "event_id": event], "unsupported_scope")
+        ]
+        for (operation, arguments, code) in rejected {
+            XCTAssertEqual(call(broker, operation, arguments)["error"]["code"], .string(code), "\(operation): \(arguments)")
+        }
+        let deletion = preview(broker, action: "delete", event: event)
+        // Even an authentic envelope cannot widen the native commit's action/scope contract.
+        for (key, value) in [("scope", "all"), ("action", "delete_calendar")] {
+            var envelope = deletion["envelope"].object!
+            envelope[key] = .string(value)
+            let payload = JSON.object(envelope)
+            let tag = HMAC<SHA256>.authenticationCode(for: try payload.data(), using: try broker.signingKey())
+            let broadened: JSON = .object(["envelope": payload, "authentication_tag": .string(Data(tag).base64EncodedString())])
+            XCTAssertEqual(commit(broker, broadened, action: "delete")["error"]["code"], .string("invalid_preview"))
+        }
+        XCTAssertEqual(backend.writeCount, 0)
+        XCTAssertEqual(backend.events.count, 1)
+        XCTAssertEqual(call(broker, "list_calendars")["result"]["calendars"], calendars)
+        XCTAssertFalse(try store.auditRecords().contains { $0["event"] == .string("write_intent") })
+        XCTAssertEqual(commit(broker, deletion, action: "delete")["result"]["deleted"], .bool(true))
+        XCTAssertEqual(backend.writeCount, 1)
+        XCTAssertTrue(backend.events.isEmpty)
+        XCTAssertEqual(call(broker, "list_calendars")["result"]["calendars"], calendars)
     }
     func testCreateModifyDeleteAndExpiredReplay() throws {
         let clock = Clock(), store = try state(), backend = SyntheticBackend()
