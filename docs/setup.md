@@ -196,6 +196,17 @@ In [ChatGPT Plugins](https://chatgpt.com/plugins), choose plus → **Add custom 
 
 This is appropriate only for the intended trusted personal workspace/tunnel association. It does not provide per-user backend identity or multi-user authorization. Review the warning and create the plugin. If the tunnel is missing, check organization/workspace association and Read + Use access. No public listener, router forwarding or public OAuth implementation is included.
 
+After server tool, schema or instruction changes, refresh and verify the private custom plugin before testing the changed capability:
+
+1. Check that the active ChatGPT workspace and selected plugin use the intended server/tunnel association.
+2. Open the plugin's details page in app settings, refresh it to pull current tools, descriptions and server instructions, and enable the intended tool toggles. This is the primary [custom MCP management workflow](https://developers.openai.com/api/docs/guides/custom-mcp-server#how-to-use).
+3. Verify all fifteen tools, `preflight_change.scope` accepting `this` and `series`, and availability of `commit_series_modify` / `commit_series_rollback`. Legacy `commit_modify` intentionally accepts only `this`; current-pattern default-field modification uses the dedicated series tool. Future-only scope, structural series changes and series deletion remain unsupported.
+4. In a fresh chat, use `@` to select the correct plugin and explicitly request only `preflight_change` with `action: modify`, `scope: series`, an identified event and the exact intended default-field patch. Inspect expanded JSON tool details. This diagnostic prepares a preview only; do not call a commit tool.
+
+If the plugin also has publishing controls, use **MCPs** → connected server → **Issues** → **Rescan**, wait for completion, then inspect **Issues found**, **Held update** and **Live definition**. New tools require approval; held changes leave existing tools' previously approved metadata live. See the [published-plugin update workflow](https://developers.openai.com/plugins/deploy/submission#update-to-your-mcp-server). These controls have not been verified in the user's private-plugin UI.
+
+Local HTTP/stdio discovery and a healthy owned tunnel do not establish ChatGPT publication. If older capabilities remain, inspect the actual connection and available definitions; refresh is not a guaranteed cache fix. See the [publication verification boundary](architecture.md#chatgpt-publication-verification). The unresolved native execution is a separate write barrier: publication cannot clear it or authorize retry/reconciliation.
+
 Verify tool discovery and a scoped read first. For a user-authorized disposable write test, review the complete signed preflight and host confirmation, then check the resulting event and journal outcome. Create/modify/delete have separate tools and permission scopes; success of one does not verify the others or guarantee a new prompt on every call.
 
 ## Optional login startup, recovery and local alerts

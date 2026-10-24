@@ -34,6 +34,14 @@ The full native suite passed 100 tests in 38.177 seconds, including nine alarm r
 
 The earlier approved no-backup security/series rollout advanced compatibility floor 2 to 3 while preserving all historical authoritative rows, encrypted details/keys, nonces, audit/quota and identity/signing metadata, protected configuration and budgets. Its protected Unix HTTP/stdio fifteen-tool discovery and zero-Calendar-tool deployment checks remain historical evidence.
 
+### ChatGPT publication verification
+
+Protected HTTP and the exact configured stdio command currently return the same fifteen-tool schema and initialization instructions, including `preflight_change.scope: this|series` and both dedicated series commit tools. The owned official tunnel is healthy and ready; its profile, actual child command, interpreter and working directory match this installation. The connected host's actual tool catalog instead exposes only the nine original tools: its preflight signature allows only `this` and lacks alerts/recurrence inputs and recovery/series tools. This establishes legacy host definitions, beyond a model's description of them.
+
+Before a harmless connected `get_change_status` diagnostic, the current owned runtime had observed no MCP initialization or dispatched requests. Afterward it recorded initialization epoch 1, four completed dispatches and responses, and zero failures; `tools/list` remained unobserved. This time correlation supports traffic reaching the current runtime, but supplies neither request-identity proof nor evidence of refreshed host tool discovery. No Calendar query or mutation was needed.
+
+For this private custom plugin, first follow the [app-details refresh and tool-selection workflow](https://developers.openai.com/api/docs/guides/custom-mcp-server#how-to-use), verify the workspace/server association and use the intended plugin in a fresh chat. If publishing controls are present, also inspect scan findings and **Live definition** using the [published-plugin workflow](https://developers.openai.com/plugins/deploy/submission#update-to-your-mcp-server). [Setup section 7](setup.md#7-add-the-private-tunnel-in-chatgpt) gives the checks and a preflight-only diagnostic. The user's management UI and refresh/approval state remain unverified; the cause of the legacy host definitions is unresolved. Model interpretation alone does not explain the inspected catalog. Legacy `commit_modify` being occurrence-only is intentional and does not describe the dedicated version-4 series tools. Publication verification does not resolve the existing unknown or bypass its fresh-write barrier.
+
 ## Historical deployments
 
 The following paragraphs record earlier releases and are superseded by the current deployment above. Their app hashes, grants, thirteen-tool discovery and restart observations are historical.
