@@ -617,8 +617,10 @@ class ProtectedLocalTransportTests(unittest.TestCase):
         # Both listeners share protocol and the same eight-slot budget.
         self.assertIs(server._unix.protocol, server.protocol)
         self.assertIs(server._unix.slots, server.slots)
+        # The response can arrive before the request worker's finally releases its
+        # slot. Wait for that cleanup before reserving the full shared budget.
         for _ in range(8):
-            self.assertTrue(server.slots.acquire(False))
+            self.assertTrue(server.slots.acquire(timeout=1))
         try:
             with self.assertRaises((OSError, http.client.HTTPException)):
                 client.status(timeout=1)
