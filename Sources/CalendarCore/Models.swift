@@ -137,7 +137,7 @@ public struct EventRecord: Equatable {
     public func view(id: String, calendar: JSON) throws -> JSON {
         let body: JSON = .object(["id": .string(id), "calendar": calendar, "occurrence": .optional(occurrence), "fields": fields.json,
                                  "recurring": .bool(recurring), "detached": .bool(detached), "has_attendees": .bool(hasAttendees),
-                                 "has_organizer": .bool(hasOrganizer), "availability": .string(availability), "status": .string(status), "details": details])
+                                 "has_organizer": .bool(hasOrganizer), "availability": .string(availability), "status": .string(status), "details": try EventSnapshot.canonicalDetails(details)])
         var object = body.object!; object["fingerprint"] = .string(digest(try body.data())); return .object(object)
     }
 }

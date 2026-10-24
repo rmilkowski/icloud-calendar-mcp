@@ -223,7 +223,7 @@ public final class Broker: @unchecked Sendable {
         if action != "create" {
             guard let id = envelope["before"]["id"].string else { throw CoreError("invalid_preview", "Missing target event") }
             existing = try event(id)
-            guard try view(existing!) == envelope["before"] else { throw CoreError("stale_event", "Event changed; request a new preflight") }
+            guard EventSnapshot.equivalent(try view(existing!), envelope["before"]) else { throw CoreError("stale_event", "Event changed; request a new preflight") }
         } else { guard envelope["before"] == .null else { throw CoreError("invalid_preview", "Unexpected create before state") } }
         try checkWritable(pair.1, event: existing)
         if action == "delete", let existing { try checkRestorable(existing, allowStandaloneOccurrence: hasStandaloneCopyRecoveryContract(envelope)) }
@@ -259,7 +259,7 @@ public final class Broker: @unchecked Sendable {
                           refreshed.details["recurrence_rules"] == .null || refreshed.details["recurrence_rules"] == .array([]) else { throw CoreError("verification_failed", "Unexpected recurrence on individual creation") }
                 }
                 if rollback, let alarms = envelope["rollback"].object?["alarm_restoration"] {
-                    guard refreshed.details["alarms"] == alarms else { throw CoreError("verification_failed", "Restored alarms differ from the signed review") }
+                    guard EventSnapshot.alarmsEquivalent(refreshed.details["alarms"], alarms) else { throw CoreError("verification_failed", "Restored alarms differ from the signed review") }
                 } else if let alerts = fields.alerts {
                     guard try EventAlert.matches(alerts, raw: refreshed.details["alarms"]) else { throw CoreError("verification_failed", "Written alerts differ from preview") }
                 }
@@ -267,7 +267,7 @@ public final class Broker: @unchecked Sendable {
                     var preservedKeys = ["url", "structured_location", "attendees", "organizer"]
                     if fields.alerts == nil && envelope["rollback"].object?["alarm_restoration"] == nil { preservedKeys.append("alarms") }
                     for key in preservedKeys {
-                        guard refreshed.details[key] == existing.details[key] else { throw CoreError("verification_failed", "Unrelated event details changed during write") }
+                        guard key == "alarms" ? EventSnapshot.alarmsEquivalent(refreshed.details[key], existing.details[key]) : refreshed.details[key] == existing.details[key] else { throw CoreError("verification_failed", "Unrelated event details changed during write") }
                     }
                     guard existing.recurring || existing.detached || refreshed.details["recurrence_rules"] == existing.details["recurrence_rules"] else { throw CoreError("verification_failed", "Unexpected recurrence change") }
                     try state.rebindEvent(id: envelope["before"]["id"].string!, to: refreshed)
@@ -277,7 +277,7 @@ public final class Broker: @unchecked Sendable {
                     let source = try state.execution(sources.array!.first!.string!)!.payload
                     let originalID = source["before"]["id"].string!
                     if action == "create" {
-                        guard recoveryDetails(refreshed.details) == envelope["rollback"]["restoration"]["details"], refreshed.availability == envelope["rollback"]["restoration"]["availability"].string else { throw CoreError("verification_failed", "Restored event details differ from the signed review") }
+                        guard EventSnapshot.detailsEquivalent(recoveryDetails(refreshed.details), envelope["rollback"]["restoration"]["details"]), refreshed.availability == envelope["rollback"]["restoration"]["availability"].string else { throw CoreError("verification_failed", "Restored event details differ from the signed review") }
                         try state.rebindEvent(id: originalID, to: refreshed)
                     }
                     result = .object(["nonce": .string(nonce), "state": .string("applied"), "action": .string(action), "event": try view(refreshed), "event_id": .string(originalID), "rollback_of": sources, "audit_sequence": .int(auditSequence)])

@@ -158,7 +158,7 @@ extension Broker {
                 if action == "create" {
                     guard previousAction == "delete", execution.payload["before"] == .null, execution.payload["rollback"]["source_change_ids"].array != nil else { throw CoreError("rollback_history_gap", "Event recreation has no verified integration deletion bridge") }
                 } else {
-                    guard execution.payload["before"] == previousAfter else { throw CoreError("rollback_history_gap", "An external or untracked event change separates the selected history; rollback would overwrite it") }
+                    guard EventSnapshot.equivalent(execution.payload["before"], previousAfter) else { throw CoreError("rollback_history_gap", "An external or untracked event change separates the selected history; rollback would overwrite it") }
                 }
             }
             previousAfter = action == "delete" ? .null : execution.result["event"]
@@ -198,7 +198,7 @@ extension Broker {
             restoration = .object(["details": recoveryDetails(desired["details"]), "availability": desired["availability"]])
         } else {
             let current = try event(eventID); before = try view(current)
-            guard before == latestExecution.result["event"] else { throw CoreError("stale_event", "Current event differs from the latest verified integration outcome") }
+            guard EventSnapshot.equivalent(before, latestExecution.result["event"]) else { throw CoreError("stale_event", "Current event differs from the latest verified integration outcome") }
             try checkWritable(calendar, event: current); action = "modify"; restoration = .null
         }
         try checkWritable(calendar)
@@ -245,7 +245,8 @@ extension Broker {
         if envelope["version"] == .int(1) {
             var value = expected.object!, rollback = expected["rollback"].object!; rollback.removeValue(forKey: "alarm_restoration"); value["rollback"] = .object(rollback); expected = .object(value)
         }
-        for key in ["action", "calendar", "before", "after", "rollback"] { guard envelope[key] == expected[key] else { throw CoreError("stale_rollback", "Rollback sources, lineage or current event changed; request a new review") } }
+        for key in ["action", "calendar", "after"] { guard envelope[key] == expected[key] else { throw CoreError("stale_rollback", "Rollback sources, lineage or current event changed; request a new review") } }
+        guard EventSnapshot.equivalent(envelope["before"], expected["before"]), EventSnapshot.rollbackMetadataEquivalent(envelope["rollback"], expected["rollback"]) else { throw CoreError("stale_rollback", "Rollback snapshots or retained alarms changed; request a new review") }
     }
     /// Only the resident native control calls this entry point with the preview it displayed.
     /// Transport dispatch cannot choose or override the consent source.

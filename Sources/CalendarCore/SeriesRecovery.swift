@@ -38,7 +38,9 @@ extension Broker {
               let maskJSON = execution.payload["series"]["changed_fields"].array else { throw CoreError("rollback_ineligible", "Select exactly one retained, applied original series change") }
         try rejectLaterCalendarIntent(after: row, calendar: calendarID)
         let current = try event(eventID), currentView = try view(current), anchor = try seriesAnchor(for: current)
-        guard current == anchor, currentView == execution.result["event"], currentView["calendar"] == execution.payload["calendar"],
+        guard current.nativeID == anchor.nativeID, current.calendarNativeID == anchor.calendarNativeID, current.occurrence == anchor.occurrence,
+              EventSnapshot.equivalent(currentView, try view(anchor, knownCalendar: currentView["calendar"])),
+              EventSnapshot.equivalent(currentView, execution.result["event"]), currentView["calendar"] == execution.payload["calendar"],
               current.occurrence == execution.payload["before"]["occurrence"].string,
               current.details["recurrence_rules"] == execution.payload["before"]["details"]["recurrence_rules"] else { throw CoreError("stale_rollback", "Current series anchor or pattern differs from the verified source result") }
         try checkWritable(currentView["calendar"], event: current)
@@ -59,6 +61,8 @@ extension Broker {
         guard UUID(uuidString: selection) != nil else { throw CoreError("invalid_preview", "Invalid series recovery selection identity") }
         let sources = try selectedRows(.object(["change_ids": envelope["rollback"]["source_change_ids"]]))
         let expected = try seriesRollbackStep(sources, selectionID: selection)["preview"]["envelope"]
-        for key in ["action", "scope", "calendar", "before", "after", "series", "recovery", "rollback"] { guard envelope[key] == expected[key] else { throw CoreError("stale_rollback", "Series recovery sources, field mask, lineage or current anchor changed") } }
+        for key in ["action", "scope", "calendar", "after", "recovery"] { guard envelope[key] == expected[key] else { throw CoreError("stale_rollback", "Series recovery sources, field mask, lineage or current anchor changed") } }
+        guard EventSnapshot.equivalent(envelope["before"], expected["before"]), EventSnapshot.seriesReferenceEquivalent(envelope["series"], expected["series"]),
+              EventSnapshot.rollbackMetadataEquivalent(envelope["rollback"], expected["rollback"]) else { throw CoreError("stale_rollback", "Series recovery snapshots or retained alarms changed") }
     }
 }

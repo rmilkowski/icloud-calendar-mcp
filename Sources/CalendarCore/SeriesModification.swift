@@ -72,9 +72,9 @@ extension Broker {
               written.availability == anchor.availability, written.status == anchor.status else { throw CoreError("verification_failed", "Written series defaults or anchor structure differ from the signed preview") }
         for key in ["url", "structured_location", "attendees", "organizer"] { guard written.details[key] == anchor.details[key] else { throw CoreError("verification_failed", "Unrelated series properties changed") } }
         if mask.contains("alerts") {
-            if let restoredAlarms { guard recoveryDetails(written.details)["alarms"] == restoredAlarms else { throw CoreError("verification_failed", "Series alarms differ from retained restoration") } }
+            if let restoredAlarms { guard EventSnapshot.alarmsEquivalent(recoveryDetails(written.details)["alarms"], restoredAlarms) else { throw CoreError("verification_failed", "Series alarms differ from retained restoration") } }
             else { guard let alerts = fields.alerts, try EventAlert.matches(alerts, raw: recoveryDetails(written.details)["alarms"]) else { throw CoreError("verification_failed", "Series alerts differ from preview") } }
-        } else { guard recoveryDetails(written.details)["alarms"] == recoveryDetails(anchor.details)["alarms"] else { throw CoreError("verification_failed", "Unmasked series alarms changed") } }
+        } else { guard EventSnapshot.alarmsEquivalent(recoveryDetails(written.details)["alarms"], recoveryDetails(anchor.details)["alarms"]) else { throw CoreError("verification_failed", "Unmasked series alarms changed") } }
     }
     func commitSeries(_ arguments: JSON, rollback: Bool) throws -> JSON {
         let a = try Arguments(arguments, allowed: ["preview"], required: ["preview"])
@@ -102,9 +102,9 @@ extension Broker {
         if rollback { try validateSeriesRollback(envelope) }
         guard let selectedID = envelope["series"]["selected"]["id"].string else { throw CoreError("invalid_preview", "Missing selected series reference") }
         let selected = try event(selectedID), selectedView = try view(selected)
-        guard selectedView == envelope["series"]["selected"] else { throw CoreError("stale_event", "Selected series occurrence changed") }
+        guard EventSnapshot.equivalent(selectedView, envelope["series"]["selected"]) else { throw CoreError("stale_event", "Selected series occurrence changed") }
         let anchor = try seriesAnchor(for: selected), before = try view(anchor, knownCalendar: selectedView["calendar"])
-        guard before == envelope["before"], before["calendar"] == envelope["calendar"] else { throw CoreError("stale_event", "Series first anchor or calendar changed") }
+        guard EventSnapshot.equivalent(before, envelope["before"]), before["calendar"] == envelope["calendar"] else { throw CoreError("stale_event", "Series first anchor or calendar changed") }
         try checkWritable(before["calendar"], event: selected); try checkWritable(before["calendar"], event: anchor)
         if mask.contains("alerts") { try validateRestorableAlarms(recoveryDetails(anchor.details)["alarms"]) }
         if !rollback {

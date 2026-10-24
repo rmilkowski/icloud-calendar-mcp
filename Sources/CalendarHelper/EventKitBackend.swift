@@ -192,7 +192,7 @@ final class EventKitBackend: CalendarBackend {
             "absolute_date": .optional($0.absoluteDate.map(iso)), "relative_offset": .string(String($0.relativeOffset)), "proximity": .int($0.proximity.rawValue), "structured_location": location($0.structuredLocation),
             "type": .int($0.type.rawValue), "email_address": .optional($0.emailAddress), "sound_name": .optional($0.soundName)]) }
         let details: JSON = .object(["url": .optional(e.url?.absoluteString), "external_id": .optional(e.calendarItemExternalIdentifier), "created": .optional(e.creationDate.map(iso)), "modified": .optional(e.lastModifiedDate.map(iso)),
-            "alarms": .array(alarms), "unsupported_external_alarm": .bool((e.alarms ?? []).contains { $0.type == .procedure || $0.type == .email }), "recurrence_rules": .array((e.recurrenceRules ?? []).map(recurrence)), "structured_location": location(e.structuredLocation),
+            "alarms": try EventSnapshot.canonicalAlarms(.array(alarms)), "unsupported_external_alarm": .bool((e.alarms ?? []).contains { $0.type == .procedure || $0.type == .email }), "recurrence_rules": .array((e.recurrenceRules ?? []).map(recurrence)), "structured_location": location(e.structuredLocation),
             "organizer": e.organizer.map { .object(["name": .optional($0.name), "url": .string($0.url.absoluteString)]) } ?? .null,
             "attendees": .array((e.attendees ?? []).map { .object(["name": .optional($0.name), "url": .string($0.url.absoluteString), "role": .int($0.participantRole.rawValue), "status": .int($0.participantStatus.rawValue), "type": .int($0.participantType.rawValue)]) })])
         let availability: String
