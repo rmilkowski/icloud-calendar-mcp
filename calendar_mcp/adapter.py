@@ -7,19 +7,21 @@ import sys
 from .protocol import VERSIONS, error, loads
 from .json_values import validate_json
 from .security import read_token
+from .local_ipc import LocalHTTPConnection
 from .server import MAX_BODY, MAX_RESPONSE
 
 
 class GatewayClient:
     def __init__(self, state, port=8765):
         self.token = read_token(state)
-        if not 1 <= port <= 65535:
+        if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("Invalid local port")
         self.port = port
+        self.state = state
 
     def send(self, wire, version=VERSIONS[-1]):
-        # HTTPConnection bypasses proxy environment and has no redirect/retry behavior.
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=50)
+        # Peer authentication precedes all HTTP bytes, including Authorization.
+        connection = LocalHTTPConnection(self.state, self.port, timeout=50)
         try:
             connection.request("POST", "/mcp", body=wire,
                                headers={"Authorization": "Bearer " + self.token,
@@ -41,7 +43,7 @@ class GatewayClient:
             connection.close()
 
     def status(self, timeout=50):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        connection = LocalHTTPConnection(self.state, self.port, timeout=timeout)
         try:
             connection.request("GET", "/status", headers={"Authorization": "Bearer " + self.token,
                                                           "Accept": "application/json"})

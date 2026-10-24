@@ -6,6 +6,7 @@ Updated 24 October 2026. This is the private calendar integration for the Mac St
 
 | Component | Status |
 | --- | --- |
+| Protected project-client gateway transport | Implemented in source, pending deployment: stdio, status, history CLI and the service monitor use protected Darwin AF_UNIX HTTP with current-UID peer checks before HTTP bytes and no TCP fallback. Manual loopback HTTP retains its existing server-identity limitation. All ten dedicated synthetic transport security tests passed. Full combined working-tree Python validation against the exact frozen Fix4 helper also passed; those counts are recorded separately with the final integrated feature validation. No production service, Calendar or authorization changes occurred. |
 | Swift core and EventKit helper | Implemented, Astra-reviewed and deployed recurrence-capable broker/core and EventKit boundary. All 67 native tests passed; the signed installed helper passed metadata-only rollout verification. Its resident metadata reports `eventkit` / `not_determined`, raw 0; the user deferred the local macOS grant. Historical real reads/create/delete were verified with an earlier helper. Live recurrence/provider behavior remains unverified. |
 | Retained history and rollback | Implemented and deployed with storage-v2 encrypted execution details, configurable five-day default retention, MCP history/recovery contracts and native local review. Original recovery-release transport/gateway coverage passed 28 synthetic tests. That release's full Python suite ran 69 tests in 2.784 seconds: 66 passed and three explicit LaunchServices tests were skipped, including the real native endpoint regression on long state paths. All 48 native tests passed. The exact final native artifact also passed 13 focused CLI/native tests in 1.376 seconds without skips after the final retention/UI changes. Programmatic native window-open acknowledgement was verified with synthetic state. The user explicitly chose to continue without a visual check; visual layout/click-through remain unverified. The current recurrence release additionally passed 67 native and 82 Python tests (79 passed, three packaged skips); deployed metadata discovery exposes thirteen tools. Calendar recovery is unverified pending the deferred OS grant and unresolved-intent guard. |
 | Native write-safety policy | Implemented and deployed: fixed local policy, native quota gate and durable cumulative destructive-intent ledger. Synthetic policy/commit checks passed in the 48-native/69-Python validation. Migration backfilled two historical delete charges, preserved after restart. No real quota-enforcement write was attempted. |
@@ -44,6 +45,8 @@ The explicit local `--authorize` path retains its EventKit store across the requ
 
 ## System design
 
+The protected gateway transport edges below describe reviewed source, pending deployment. Historical Studio HTTP/stdio observations above do not establish that this boundary is deployed.
+
 ```mermaid
 flowchart TB
     U[User in ChatGPT] --> C[ChatGPT native tool confirmation]
@@ -58,7 +61,9 @@ flowchart TB
         M --> N[Private operational log and desktop notification attempt]
         TC[Official tunnel-client process] -->|Outbound authenticated connection| T
         TC <-->|Local stdio| A[Local MCP adapter]
-        A -->|Loopback HTTP and bearer token| G[Python MCP gateway]
+        A -->|Protected Unix HTTP peer UID and bearer| G[Python MCP gateway]
+        MANUAL[Explicit manual HTTP client] -->|Loopback TCP bearer with external server trust| G
+        M -->|Protected Unix status| G
         G -->|Exact signed app launch| L[LaunchServices open]
         L --> B[Swift bundled native broker and core]
         G <-->|Private request and response FIFOs| B
@@ -66,7 +71,8 @@ flowchart TB
         G -->|Sole lifetime FIFO writer| W[Independent native EOF watchdog]
         W -->|Gateway death stops broker| B
         P[Protected write-safety.json and recovery-policy.json] -->|Native policy reload| B
-        CLI[Local changes list and show] -->|Authenticated history reads| G
+        CLI[Local changes list and show] -->|Protected Unix history reads| G
+        OPEN -->|Protected Unix capability discovery| G
         OPEN[Local changes open] -->|Protected open-only Unix socket| UI[Native AppKit recovery window]
         UI -->|Review and Apply captured signed preview| B
         B <--> D[(SQLite encrypted details keys identity journal quota and minimal audit)]
@@ -104,7 +110,7 @@ The backend trusts an authenticated caller using ChatGPT's host policy. An allow
 | Boundary | Required behavior |
 | --- | --- |
 | ChatGPT and tunnel | Restrict workspace access; protect and revoke runtime credentials. Test native confirmation display. |
-| Adapter and gateway | Literal `127.0.0.1` binding, dedicated 256-bit token on every valid HTTP method, exact Host and fail-closed Origin validation, bounded request size/concurrency/execution time. No redirects, proxy-environment routing or arbitrary caller-selected URLs. Loopback alone is not authentication. |
+| Adapter and gateway | Source project clients derive a protected Darwin Unix endpoint from canonical gateway state and the configured authority port. They validate the private OS temporary base, owned `0700` parent and owned `0600` socket, then check peer UID using Darwin libc `getpeereid` before sending HTTP bytes. The Unix listener checks peer UID before HTTP parsing. All HTTP requests retain bearer authentication and exact Host/Origin checks, with bounded sizes, concurrency and deadlines. No redirects, proxy-environment routing, retries or TCP fallback. Manual literal-`127.0.0.1` HTTP does not authenticate server identity: an external/manual bearer client can expose credentials to a port prebinder and must use the protected project client or an independently authenticated encrypted channel. |
 | Gateway and broker | EventKit launches exact app through LaunchServices; private owned request/response/lifetime FIFOs, noninherited sole lifetime writer and independent native watchdog. Synthetic normally uses direct pipes. Narrow operation allowlist, strict typed schemas and unknown-argument rejection. No approval API or arbitrary native dispatch. |
 | Broker and state | Native-only signing secret; protected SQLite registry, journal, destructive-intent ledger and audit; serialized mutations and fail-closed policy/durability checks. |
 | Recovery details and local UI | Native storage-v2 encrypts event-bearing execution details with per-record keys and keeps minimal replay/audit/quota metadata. A protected open-only socket can activate the AppKit window; native review captures the exact signed step and Apply executes inside the broker with fixed `local_native_ui` provenance. Neither Python nor the socket accepts approval or replacement write payloads. |
@@ -164,6 +170,14 @@ The resident helper launches with `--serve --state-dir <private-native-state> --
 Per-launch FIFOs live in an owned `0700` temporary directory with `0600` FIFO permissions. Anchors are nonblocking, close-on-exec and never inherited by `open`. Request/response RDWR anchors prevent startup rendezvous/EOF races, while the monitored `open -W` wrapper detects app exit. Only Python owns the lifetime writer; an independent native watcher installed before state access exits on EOF/error/unexpected input even if request execution is blocked. Clean teardown closes request input first, waits briefly, then closes lifetime to bound a hung broker and finally cleans the wrapper. Native PID is diagnostic metadata, never a signalling authority. No private TCC/responsibility API or additional host Calendar grant is used.
 
 Native internal `authorization_status` accepts only `{}` and returns backend, PID, authorization name and raw value. Synthetic returns `not_applicable`/null without invoking EventKit; EventKit uses only static authorization status, with no store construction/query/prompt. LaunchServices startup validates this handshake. Authenticated fixed GET `/status` and the local status CLI query that actual resident broker without exposing another MCP tool. Reachability remains distinct from full access; denied/not-determined status does not itself prevent diagnostic service startup.
+
+The source project-client transport is protected Darwin AF_UNIX HTTP, pending deployment. `GatewayClient.send` and `.status` use it, so stdio, status CLI, history list/show/open capability discovery and service monitoring inherit the same boundary. `--port` remains the conventional HTTP authority and selects the matching Unix endpoint; project clients never use it as a TCP route. Missing or unsafe Unix transport fails closed before HTTP credentials or payloads are sent. Unsupported platforms or unavailable peer-identity APIs also fail closed. Same-UID malicious processes remain outside file-permission isolation. Manual TCP compatibility retains its server-identity risk; the direct TCP security tests establish authentication/parser behavior only.
+
+The endpoint is `<confstr(_CS_DARWIN_USER_TEMP_DIR)>/cmgw-<hash>/s`. Its hash is the first 20 lowercase SHA-256 hex characters of strict UTF-8 canonical gateway-state path, NUL and ASCII decimal actual authority port. Darwin's numeric confstr fallback is 65537. The supplied temporary-base leaf is validated before and after POSIX canonicalization: owned directory, no symlink leaf and no group/other mode bits. There is no `TMPDIR` or shared `/tmp` fallback. The owned child is exactly `0700`; the owned socket is exactly `0600` with one link; its encoded full path is under 104 bytes. Both peers require current installation UID through the documented libc `getpeereid` call before HTTP parsing/emission. A port-0 synthetic server learns its actual TCP authority before deriving this endpoint.
+
+Startup binds TCP first, obtains an exclusive private per-endpoint `flock`, and reclaims only a valid stale owned socket under that lock before binding Unix. Unsafe existing nodes are refused. Unix setup failure is fatal and closes the TCP listener. Cleanup removes only the socket device/inode recorded after bind, preserving replacement nodes. It does not recursively remove directories. Both listeners share the same protocol/native broker, eight-connection semaphore and HTTP limits; shutdown closes both and joins the secondary listener. Native previews, host consent, journal, audit and replay semantics are unchanged.
+
+Synthetic regression coverage includes zero fake-TCP connections when Unix is missing or unsafe, wrong connect/accept peer UID before HTTP bytes, peer-query failure, Unicode/long-state and port-specific derivation, `TMPDIR` manipulation, unsafe directories/sockets/lock files, repeated path/peer checks, shared connection limits, partial-startup cleanup, exclusive ownership, stale socket reclaim and inode-safe replacement preservation. These checks establish source behavior, not deployed transport or live Calendar behavior.
 
 HTTP POST `/mcp` supports JSON responses with no session state or SSE subscription. Initialized notifications return 202; GET/other methods at `/mcp` return authenticated 405. Supported versions are `2025-03-26`, `2025-06-18` and `2025-11-25`; unsupported versions fail closed. Bodies are limited to 1 MiB, native responses to 4 MiB and HTTP responses to 8 MiB; JSON duplicate keys, nonfinite numbers, excessive nesting and unknown tool arguments are rejected. Eight request threads, five-second socket inactivity, a 55-second connection deadline and 45-second native deadline bound resources. Native dispatch is independently serialized and validated.
 

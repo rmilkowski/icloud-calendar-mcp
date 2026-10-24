@@ -1,6 +1,9 @@
-"""Bounded private loopback Streamable HTTP server (JSON response mode only)."""
+"""Bounded protected local and manual loopback HTTP listeners (JSON mode)."""
 
+import fcntl
 import hmac
+import os
+import stat
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import socket
@@ -9,23 +12,16 @@ import threading
 
 from .protocol import VERSIONS, error, loads
 from .native import NativeError
+from .local_ipc import gateway_path, require_peer, validate_directory, validate_socket
 
 MAX_BODY = 1024 * 1024
 MAX_RESPONSE = 8 * 1024 * 1024
 
 
-class GatewayServer(ThreadingMixIn, HTTPServer):
+class BoundedRequests(ThreadingMixIn):
     daemon_threads = True
     block_on_close = True
     request_queue_size = 8
-
-    def __init__(self, port, token, protocol):
-        self.token = token
-        self.protocol = protocol
-        self.slots = threading.BoundedSemaphore(8)
-        super().__init__(("127.0.0.1", port), Handler)
-        self.authority = "127.0.0.1:" + str(self.server_port)
-        self.origin = "http://" + self.authority
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
@@ -46,6 +42,139 @@ class GatewayServer(ThreadingMixIn, HTTPServer):
     def handle_error(self, request, client_address):
         # No traceback or request/credential/calendar data in logs.
         pass
+
+
+class UnixGatewayServer(BoundedRequests, HTTPServer):
+    address_family = socket.AF_UNIX
+
+    def __init__(self, owner, path):
+        self.owner = owner
+        self.slots = owner.slots
+        super().__init__(str(path), Handler, bind_and_activate=False)
+
+    def __getattr__(self, name):
+        if name in ("token", "protocol", "authority", "origin"):
+            return getattr(self.owner, name)
+        raise AttributeError(name)
+
+    def server_bind(self):
+        # HTTPServer.server_bind assumes an internet address tuple.
+        self.socket.bind(self.server_address)
+
+    def get_request(self):
+        connection, address = self.socket.accept()
+        try:
+            require_peer(connection)
+            return connection, address
+        except BaseException:
+            connection.close()
+            raise
+
+
+class GatewayServer(BoundedRequests, HTTPServer):
+    def __init__(self, port, token, protocol, state_directory=None):
+        self.token = token
+        self.protocol = protocol
+        self.slots = threading.BoundedSemaphore(8)
+        self._unix = None
+        self._unix_thread = None
+        self._unix_stop_lock = threading.Lock()
+        self._endpoint = None
+        self._endpoint_identity = None
+        self._startup_lock = None
+        self._serving = threading.Event()
+        self._serving_thread = None
+        # Bind TCP first: its port remains the conventional HTTP authority.
+        super().__init__(("127.0.0.1", port), Handler)
+        self.authority = "127.0.0.1:" + str(self.server_port)
+        self.origin = "http://" + self.authority
+        try:
+            if state_directory is not None:
+                self._open_unix(state_directory)
+        except BaseException:
+            self.server_close()
+            raise
+
+    def _open_unix(self, state):
+        path = gateway_path(state, self.server_port)
+        try:
+            path.parent.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        validate_directory(path.parent, exact=True)
+        # Persistent lock is private and cannot be replaced by another UID.
+        descriptor = os.open(path.parent / "owner.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                raise ValueError("Invalid local transport startup lock")
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._startup_lock = descriptor
+        self._endpoint = path
+        try:
+            validate_socket(path)
+        except FileNotFoundError:
+            pass
+        else:
+            # Only a valid owned stale socket can be reclaimed under the lock.
+            path.unlink()
+        self._unix = UnixGatewayServer(self, path)
+        self._unix.server_bind()
+        # Capture our inode before permission/activation operations can fail.
+        info = path.lstat()
+        self._endpoint_identity = (info.st_dev, info.st_ino)
+        path.chmod(0o600)
+        validate_socket(path)
+        self._unix.server_activate()
+
+    def serve_forever(self, poll_interval=0.5):
+        self._serving_thread = threading.get_ident()
+        self._serving.set()
+        try:
+            if self._unix is not None:
+                self._unix_thread = threading.Thread(target=self._unix.serve_forever,
+                    kwargs={"poll_interval": poll_interval}, daemon=True)
+                self._unix_thread.start()
+            super().serve_forever(poll_interval=poll_interval)
+        finally:
+            self._stop_unix()
+            self._serving.clear()
+
+    def _stop_unix(self):
+        with self._unix_stop_lock:
+            thread = self._unix_thread
+            if thread is not None and thread.is_alive():
+                self._unix.shutdown()
+                if thread.ident != threading.get_ident():
+                    thread.join()
+            self._unix_thread = None
+
+    def shutdown(self):
+        # BaseServer.shutdown deadlocks when called before serve_forever.
+        if self._serving.is_set() and self._serving_thread != threading.get_ident():
+            super().shutdown()
+
+    def server_close(self):
+        self._stop_unix()
+        if self._unix is not None:
+            self._unix.server_close()
+            self._unix = None
+        super().server_close()
+        if self._endpoint_identity is not None:
+            try:
+                info = self._endpoint.lstat()
+                if (info.st_dev, info.st_ino) == self._endpoint_identity and stat.S_ISSOCK(info.st_mode):
+                    self._endpoint.unlink()
+            except FileNotFoundError:
+                pass
+            self._endpoint_identity = None
+        if self._startup_lock is not None:
+            os.close(self._startup_lock)
+            self._startup_lock = None
 
 
 class Handler(BaseHTTPRequestHandler):

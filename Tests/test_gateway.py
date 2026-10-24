@@ -176,7 +176,7 @@ class HTTPTests(unittest.TestCase):
         self.state = initialize(Path(self.temp.name) / "state")
         self.token = read_token(self.state)
         self.broker = FakeBroker()
-        self.server = GatewayServer(0, self.token, Protocol(self.broker))
+        self.server = GatewayServer(0, self.token, Protocol(self.broker), state_directory=self.state)
         self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
         self.thread.start()
         self.port = self.server.server_port
@@ -314,11 +314,11 @@ class AdapterTests(unittest.TestCase):
         for bad in (b'{"result":1e999}', b'{"result":"\\ud800"}', b'{'):
             with self.subTest(response=bad):
                 client = GatewayClient.__new__(GatewayClient)
-                client.token, client.port = "synthetic-fixture-token", 8765
+                client.token, client.port, client.state = "synthetic-fixture-token", 8765, "synthetic-state"
                 responses = [Connection(Response(bad)), Connection(Response(b'{"jsonrpc":"2.0","id":2,"result":{}}'))]
                 sink = io.BytesIO()
                 source = io.BytesIO(b"".join(json.dumps(request("ping", identifier=index)).encode() + b"\n" for index in (1, 2)))
-                with patch("calendar_mcp.adapter.http.client.HTTPConnection", side_effect=responses) as connections:
+                with patch("calendar_mcp.adapter.LocalHTTPConnection", side_effect=responses) as connections:
                     self.assertEqual(run_stdio(client, source, sink), 0)
                 first, second = [loads(line) for line in sink.getvalue().splitlines()]
                 self.assertEqual(first["id"], 1)
@@ -464,6 +464,262 @@ class NativeTransportTests(unittest.TestCase):
                 self.assertEqual(result["notes"], fields["notes"])
             finally:
                 broker.close()
+
+
+class ProtectedLocalTransportTests(unittest.TestCase):
+    """All fixtures use private temporary state and synthetic credentials only."""
+    def setUp(self):
+        from calendar_mcp import local_ipc
+        self.ipc = local_ipc
+        self.temp = tempfile.TemporaryDirectory(prefix="cmgw-test-", dir="/private/tmp")
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o700)
+        self.state = initialize(self.root / "state")
+        self.base = self.root / "base"
+        self.base.mkdir(mode=0o700)
+        # Exercise the real base validator while isolating every test endpoint.
+        self.confstr = patch("calendar_mcp.local_ipc.os.confstr", return_value=str(self.base))
+        self.confstr.start()
+        self.addCleanup(self.confstr.stop)
+        self.addCleanup(self.temp.cleanup)
+
+    def server(self):
+        server = GatewayServer(0, read_token(self.state), Protocol(FakeBroker()), state_directory=self.state)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        thread.start()
+        def close():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(close)
+        return server
+
+    def test_fake_tcp_listener_receives_zero_connections_when_unix_missing_or_unsafe(self):
+        import select
+        with socket.socket() as fake:
+            fake.bind(("127.0.0.1", 0))
+            fake.listen(1)
+            port = fake.getsockname()[1]
+            client = GatewayClient(self.state, port)
+            path = self.ipc.gateway_path(self.state, port)
+            for mode in ("missing", "public-parent", "regular-file", "symlink", "hardlink"):
+                with self.subTest(mode=mode):
+                    if mode != "missing":
+                        path.parent.mkdir(mode=0o700, exist_ok=True)
+                    if mode == "public-parent":
+                        path.parent.chmod(0o755)
+                    elif mode == "regular-file":
+                        path.write_bytes(b"fixture")
+                        path.chmod(0o600)
+                    elif mode == "symlink":
+                        path.symlink_to(self.state / "gateway.token")
+                    elif mode == "hardlink":
+                        os.link(self.state / "gateway.token", path)
+                    for operation in (lambda: client.send(b'{"jsonrpc":"2.0","id":1,"method":"ping"}'), client.status):
+                        with self.assertRaises((ValueError, OSError)):
+                            operation()
+                        self.assertEqual(select.select([fake], [], [], 0)[0], [])
+                    if path.exists() or path.is_symlink():
+                        path.unlink()
+                    if path.parent.exists():
+                        path.parent.chmod(0o700)
+
+    def test_connect_rejects_wrong_peer_before_any_http_bytes_and_does_not_retry(self):
+        path = self.ipc.gateway_path(self.state, 24680)
+        path.parent.mkdir(mode=0o700)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as fake:
+            fake.bind(str(path)); path.chmod(0o600); fake.listen(1)
+            for operation in (lambda client: client.send(b'{"id":1}'), lambda client: client.status()):
+                client = GatewayClient(self.state, 24680)
+                with patch("calendar_mcp.local_ipc.peer_uid", return_value=os.getuid() + 1) as check:
+                    with self.assertRaises(OSError):
+                        operation(client)
+                self.assertEqual(check.call_count, 1)
+                connection, _ = fake.accept()
+                with connection:
+                    connection.settimeout(1)
+                    self.assertEqual(connection.recv(4096), b"")
+            fake.settimeout(0.02)
+            with self.assertRaises(TimeoutError):
+                fake.accept()
+
+    def test_server_rejects_wrong_peer_before_constructing_http_handler(self):
+        server = self.server()
+        path = self.ipc.gateway_path(self.state, server.server_port)
+        with patch("calendar_mcp.server.require_peer", side_effect=OSError("rejected")), \
+                patch("calendar_mcp.server.Handler") as handler:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(1)
+                connection.connect(str(path))
+                self.assertEqual(connection.recv(4096), b"")
+            handler.assert_not_called()
+        self.assertEqual(server.protocol.broker.calls, [])
+
+    def test_peer_wrapper_fails_closed_and_real_darwin_pair_has_current_uid(self):
+        from unittest.mock import Mock
+        left, right = socket.socketpair()
+        try:
+            self.assertEqual(self.ipc.peer_uid(left), os.getuid())
+            library = Mock()
+            library.getpeereid.return_value = -1
+            with patch("calendar_mcp.local_ipc.ctypes.CDLL", return_value=library), \
+                    patch("calendar_mcp.local_ipc.ctypes.get_errno", return_value=13):
+                with self.assertRaises(OSError):
+                    self.ipc.require_peer(left)
+            with patch("calendar_mcp.local_ipc.ctypes.CDLL", side_effect=OSError("unavailable")):
+                with self.assertRaises(OSError):
+                    self.ipc.require_peer(left)
+            with patch("calendar_mcp.local_ipc.sys.platform", "unsupported"):
+                with self.assertRaises(OSError):
+                    self.ipc.require_peer(left)
+        finally:
+            left.close(); right.close()
+
+    def test_derivation_uses_canonical_utf8_state_port_and_ignores_tmpdir(self):
+        import hashlib
+        state = initialize(self.root / ("Unicode e\u0301 👩🏽‍💻 " + "long" * 35))
+        canonical = os.path.realpath(state)
+        expected = hashlib.sha256(canonical.encode("utf-8") + b"\0" + b"24680").hexdigest()[:20]
+        with patch.dict(os.environ, {"TMPDIR": "/tmp/attacker"}):
+            path = self.ipc.gateway_path(state, 24680)
+        self.assertEqual(path, self.base / ("cmgw-" + expected) / "s")
+        self.assertNotEqual(path, self.ipc.gateway_path(state, 24681))
+        self.assertLess(len(os.fsencode(path)), 104)
+        with patch("calendar_mcp.local_ipc.temporary_base", return_value=self.root / ("x" * 100)):
+            with self.assertRaises(ValueError):
+                self.ipc.gateway_path(state, 24680)
+
+    def test_unsafe_os_base_and_child_fail_closed(self):
+        public = self.root / "public"; public.mkdir(mode=0o755); public.chmod(0o755)
+        link = self.root / "link"; link.symlink_to(self.base, target_is_directory=True)
+        for value in (str(public), str(link), "relative", None):
+            with self.subTest(value=value), patch("calendar_mcp.local_ipc.os.confstr", return_value=value):
+                with self.assertRaises(ValueError):
+                    self.ipc.gateway_path(self.state, 24680)
+        with patch("calendar_mcp.local_ipc.os.getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(ValueError):
+                self.ipc.temporary_base()
+        path = self.ipc.gateway_path(self.state, 24680)
+        path.parent.symlink_to(self.state, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            self.ipc.LocalHTTPConnection(self.state, 24680).connect()
+
+    def test_authentic_unix_requests_repeat_path_and_peer_validation(self):
+        server = self.server()
+        client = GatewayClient(self.state, server.server_port)
+        with patch("calendar_mcp.local_ipc.require_peer", wraps=self.ipc.require_peer) as peer, \
+                patch("calendar_mcp.local_ipc.validate_socket", wraps=self.ipc.validate_socket) as path:
+            self.assertEqual(client.send(json.dumps(request("ping")).encode())["result"], {})
+            self.assertEqual(client.status()["gateway"], "reachable")
+        self.assertEqual(peer.call_count, 2)
+        self.assertEqual(path.call_count, 2)
+        # Both listeners share protocol and the same eight-slot budget.
+        self.assertIs(server._unix.protocol, server.protocol)
+        self.assertIs(server._unix.slots, server.slots)
+        for _ in range(8):
+            self.assertTrue(server.slots.acquire(False))
+        try:
+            with self.assertRaises((OSError, http.client.HTTPException)):
+                client.status(timeout=1)
+            self.assertFalse(server.slots.acquire(False))
+        finally:
+            for _ in range(8):
+                server.slots.release()
+
+    def test_startup_refuses_unsafe_existing_nodes_and_closes_tcp_on_failure(self):
+        path = self.ipc.gateway_path(self.state, 24680)
+        path.parent.mkdir(mode=0o700)
+        captured = []
+        original = GatewayServer.server_bind
+        def bind(server):
+            original(server)
+            captured.append(server.socket)
+        for node in ("regular", "symlink", "hardlink", "public-socket"):
+            with self.subTest(node=node):
+                connection = None
+                if node == "regular":
+                    path.write_bytes(b"fixture"); path.chmod(0o600)
+                elif node == "symlink":
+                    path.symlink_to(self.state / "gateway.token")
+                elif node == "hardlink":
+                    os.link(self.state / "gateway.token", path)
+                else:
+                    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    connection.bind(str(path)); path.chmod(0o666)
+                try:
+                    with patch("calendar_mcp.server.gateway_path", return_value=path), \
+                            patch.object(GatewayServer, "server_bind", bind):
+                        with self.assertRaises(ValueError):
+                            GatewayServer(0, "fixture", Protocol(FakeBroker()), state_directory=self.state)
+                    self.assertEqual(captured[-1].fileno(), -1)
+                    self.assertTrue(path.exists())
+                finally:
+                    if connection is not None:
+                        connection.close()
+                    path.unlink()
+
+    def test_socket_metadata_and_startup_lock_reject_links_modes_and_wrong_owner(self):
+        path = self.ipc.gateway_path(self.state, 24680)
+        path.parent.mkdir(mode=0o700)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as endpoint:
+            endpoint.bind(str(path)); path.chmod(0o600)
+            actual = path.lstat()
+            with patch("calendar_mcp.local_ipc.Path.lstat", side_effect=lambda item=None: actual):
+                # Wrong-owner check is isolated from directory validation.
+                with patch("calendar_mcp.local_ipc.validate_directory"), \
+                        patch("calendar_mcp.local_ipc.os.getuid", return_value=actual.st_uid + 1):
+                    with self.assertRaises(ValueError):
+                        self.ipc.validate_socket(path)
+            twin = path.parent / "linked"
+            os.link(path, twin)
+            with self.assertRaises(ValueError):
+                self.ipc.validate_socket(path)
+            twin.unlink()
+        path.unlink()
+        lock = path.parent / "owner.lock"
+        for kind in ("symlink", "hardlink", "public"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    lock.symlink_to(self.state / "gateway.token")
+                elif kind == "hardlink":
+                    os.link(self.state / "gateway.token", lock)
+                else:
+                    lock.write_bytes(b"fixture"); lock.chmod(0o644)
+                with patch("calendar_mcp.server.gateway_path", return_value=path):
+                    with self.assertRaises((ValueError, OSError)):
+                        GatewayServer(0, "fixture", Protocol(FakeBroker()), state_directory=self.state)
+                self.assertTrue(lock.exists())
+                self.assertFalse(path.exists())
+                lock.unlink()
+
+    def test_exclusive_startup_and_inode_safe_cleanup_preserve_replacements(self):
+        from calendar_mcp.server import UnixGatewayServer
+        path = self.ipc.gateway_path(self.state, 24680)
+        with patch("calendar_mcp.server.gateway_path", return_value=path):
+            first = GatewayServer(0, "fixture", Protocol(FakeBroker()), state_directory=self.state)
+            try:
+                with self.assertRaises(OSError):
+                    GatewayServer(0, "fixture", Protocol(FakeBroker()), state_directory=self.state)
+                identity = path.lstat().st_ino
+                self.assertEqual(identity, first._endpoint_identity[1])
+                path.unlink()
+                path.write_bytes(b"replacement")
+                first.shutdown()  # Must be safe before serving starts.
+            finally:
+                first.server_close()
+            self.assertEqual(path.read_bytes(), b"replacement")
+            path.unlink()
+            # Reclaim a genuine stale owned socket only under exclusive lock.
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stale:
+                stale.bind(str(path)); path.chmod(0o600)
+            again = GatewayServer(0, "fixture", Protocol(FakeBroker()), state_directory=self.state)
+            again.server_close()
+            self.assertFalse(path.exists())
+            with patch.object(UnixGatewayServer, "server_activate", side_effect=OSError("fixture")):
+                with self.assertRaises(OSError):
+                    GatewayServer(0, "fixture", Protocol(FakeBroker()), state_directory=self.state)
+            self.assertFalse(path.exists())
 
 
 if __name__ == "__main__":

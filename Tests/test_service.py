@@ -498,7 +498,7 @@ class ServiceTests(unittest.TestCase):
                 raise AssertionError("Calendar operation must never be dispatched")
         broker = Broker()
         from calendar_mcp.security import read_token
-        server = GatewayServer(0, read_token(self.state), Protocol(broker))
+        server = GatewayServer(0, read_token(self.state), Protocol(broker), state_directory=self.state)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:

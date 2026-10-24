@@ -179,7 +179,7 @@ class RecurrenceHTTPTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="calendar recurring transport ") as directory:
             state = initialize(Path(directory) / "state")
             broker = RecurrenceBroker()
-            server = GatewayServer(0, read_token(state), Protocol(broker))
+            server = GatewayServer(0, read_token(state), Protocol(broker), state_directory=state)
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
             thread.start()
             try:

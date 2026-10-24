@@ -56,11 +56,11 @@ def main(argv=None):
             broker = NativeBroker(args.helper, native_state, args.backend,
                                   credential_binding=hashlib.sha256(token.encode("ascii")).hexdigest())
             try:
-                with GatewayServer(args.port, token, Protocol(broker)) as server:
+                with GatewayServer(args.port, token, Protocol(broker), state_directory=state) as server:
                     def stop(signum, frame):
                         raise KeyboardInterrupt()
                     signal.signal(signal.SIGTERM, stop)
-                    print("Calendar MCP listening on private loopback; backend=" + args.backend, file=sys.stderr)
+                    print("Calendar MCP listening on protected local transport; backend=" + args.backend, file=sys.stderr)
                     server.serve_forever(poll_interval=0.25)
             finally:
                 broker.close()

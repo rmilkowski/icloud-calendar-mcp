@@ -62,7 +62,7 @@ env CLANG_MODULE_CACHE_PATH=/private/tmp/calendar-mcp-clang-cache \
 
 This disables SwiftPM's nested build sandbox, not the outer managed environment. The packaging script already selects this option. `swift build --show-bin-path` identifies the current toolchain's product directory; set `CALENDAR_MCP_TEST_HELPER` to that directory's `CalendarHelper` if test autodetection needs an override.
 
-Automated tests use synthetic providers and temporary state. Build/test commands do not authorize real Calendar access. HTTP tests need temporary private loopback listeners. Default tests skip explicit LaunchServices app-launch tests; after packaging, opt into those synthetic-only lifecycle tests with:
+Automated tests use synthetic providers and temporary state. Build/test commands do not authorize real Calendar access. HTTP tests need temporary protected Unix and private loopback listeners. Default tests skip explicit LaunchServices app-launch tests; after packaging, opt into those synthetic-only lifecycle tests with:
 
 ```sh
 CALENDAR_MCP_TEST_LAUNCH_SERVICES=1 python3 -m unittest discover -s Tests -v
@@ -104,7 +104,7 @@ Direct `.app/Contents/MacOS/CalendarHelper --status` or `--authorize` can inheri
 
 ## 4. Start the gateway and check status
 
-Choose one loopback port and use it consistently for gateway, adapter and tunnel. The default is 8765. If it is occupied, choose another port; do not stop an unrelated listener.
+Choose one HTTP authority port and use it consistently for gateway, adapter and tunnel. The default is 8765. If it is occupied, choose another port; do not stop an unrelated listener. Source project clients use this port to derive a protected Unix endpoint, rather than connecting over TCP.
 
 ```sh
 ./scripts/calendar-mcp init
@@ -123,7 +123,11 @@ In another Terminal, from the repository:
 
 Expect `gateway: reachable`, native `backend_mode: eventkit`, `authorization_status: full_access`, raw 3. Status queries only authorization metadata from the actual resident broker: no EventKit store, calendar/event query or permission prompt. A reachable gateway can report denied/not-determined, so inspect the native state rather than treating reachability as a grant.
 
-Only literal `127.0.0.1` is bound. MCP uses authenticated POST `/mcp`; GET `/mcp` is 405 and there is no SSE subscription. Authenticated GET `/status` is local diagnostics, not an extra MCP tool. The stdio adapter reads the protected token itself; do not put it in client configuration.
+The reviewed source adds a protected Darwin Unix listener alongside literal `127.0.0.1` HTTP, pending deployment. The stdio adapter, status/history CLI and service monitor use only Unix HTTP. They validate the private OS temporary base, owned `0700` parent and owned `0600` single-link socket, then verify the connected peer UID with libc `getpeereid` before sending HTTP bytes. The listener checks peer UID before parsing HTTP. The authority/Host remains `127.0.0.1:<port>`. There is no TCP fallback, proxy routing, redirect or request retry. Same-UID malicious processes remain outside file-permission isolation.
+
+The source requires Darwin peer identity support and private per-user temporary storage, independent of `TMPDIR`. The short endpoint is derived from canonical gateway state and actual authority port; missing or unsafe transport fails closed. See [transport architecture](architecture.md#trust-boundaries) for exact derivation, validation and lifecycle rules. MCP uses authenticated POST `/mcp`; GET `/mcp` is 405 and there is no SSE subscription. Authenticated GET `/status` is local diagnostics, not an extra MCP tool. The adapter reads the protected token itself; do not put it in client configuration.
+
+Manual third-party TCP HTTP retains its existing server-identity limitation: another UID can prebind the port while the gateway is down and capture a bearer sent to it. Use the protected project client or an independently authenticated encrypted channel. The direct manual TCP interface does not receive Unix peer authentication; do not send a bearer to an old or unidentified TCP listener to test whether it is the gateway.
 
 EventKit IPC uses owned `0700` temporary directories and `0600` request/response/lifetime FIFOs. Only the gateway holds the noninherited lifetime writer. An independent native watchdog stops a broker even if execution/output blocks when the gateway dies. Native PID is diagnostic metadata and is never a signalling authority. No private TCC API or raw-executable production fallback is used.
 
@@ -260,6 +264,8 @@ tool_timeout_sec = 55
 For synthetic tests add its explicit `--state-dir` to `args`. The documented `writes` policy prompts for tools not marked read-only; remembered/per-tool settings can affect it. See [Codex MCP configuration](https://developers.openai.com/codex/mcp). Registering a command alone does not establish its approval policy. A remote laptop does not automatically use this Mac's local configuration; an SSH stdio launch or other remote arrangement must be explicitly configured and authorized separately.
 
 ## Current Studio deployment
+
+**Protected transport is source-only, pending coordinated cutover.** The historical observations below describe the existing TCP gateway and do not establish deployment of Unix peer authentication. The upgraded adapter/status/monitor intentionally cannot authenticate to a TCP-only gateway. Do not bypass this by probing the old TCP listener with its bearer. Cut over gateway and owned clients together: stop the monitor, stop the owned official managed runtime, stop the owned gateway, update reviewed code, start the gateway, verify protected Unix metadata, refresh the owned adapter and restart the monitor last. Preserve protected credentials, configuration, policies, authoritative native history and persisted monitor budgets. No production state/service, Calendar access or authorization change was performed for the source validation recorded here.
 
 This dated operational note is separate from fresh installation. On 24 October 2026 the user explicitly approved database migrations without a database backup for the current and future feature/fix changes, supplementing standing feature/fix service-restart authorization. The reviewed storage-v2 migration and helper replacement then completed. An earlier automatic-review rejection happened before execution and was superseded by that explicit approval; it was not a migration failure.
 

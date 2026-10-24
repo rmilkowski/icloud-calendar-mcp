@@ -32,7 +32,7 @@ class NativeIntegrationTests(unittest.TestCase):
             token = read_token(state)
             native = private_directory(state / "native-synthetic")
             broker = NativeBroker(HELPER, native, "synthetic", credential_binding=hashlib.sha256(token.encode()).hexdigest())
-            server = GatewayServer(0, token, Protocol(broker))
+            server = GatewayServer(0, token, Protocol(broker), state_directory=state)
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
             thread.start()
             adapter = None
@@ -150,7 +150,7 @@ class NativeIntegrationTests(unittest.TestCase):
             except BaseException:
                 broker.close()
                 raise
-            server = GatewayServer(0, token, Protocol(broker))
+            server = GatewayServer(0, token, Protocol(broker), state_directory=state)
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
             thread.start()
             try:
@@ -227,7 +227,7 @@ class NativeIntegrationTests(unittest.TestCase):
             token = read_token(state)
             native = private_directory(state / "native-synthetic")
             broker = NativeBroker(HELPER, native, "synthetic", credential_binding=hashlib.sha256(token.encode()).hexdigest())
-            server = GatewayServer(0, token, Protocol(broker))
+            server = GatewayServer(0, token, Protocol(broker), state_directory=state)
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
             thread.start()
             adapter = None
@@ -311,7 +311,7 @@ class NativeIntegrationTests(unittest.TestCase):
                 new_token = read_token(state)
                 self.assertNotEqual(token, new_token)
                 broker = NativeBroker(HELPER, native, "synthetic", credential_binding=hashlib.sha256(new_token.encode()).hexdigest())
-                server = GatewayServer(0, new_token, Protocol(broker))
+                server = GatewayServer(0, new_token, Protocol(broker), state_directory=state)
                 thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
                 thread.start()
                 client = GatewayClient(state, server.server_port)
@@ -336,7 +336,7 @@ class NativeIntegrationTests(unittest.TestCase):
             token = read_token(state)
             native = private_directory(state / "native-synthetic")
             broker = NativeBroker(HELPER, native, "synthetic", credential_binding=hashlib.sha256(token.encode()).hexdigest())
-            server = GatewayServer(0, token, Protocol(broker))
+            server = GatewayServer(0, token, Protocol(broker), state_directory=state)
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
             thread.start()
             try:
