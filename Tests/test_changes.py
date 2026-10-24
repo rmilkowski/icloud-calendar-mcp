@@ -2,10 +2,12 @@
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
 import socket
+import stat
 import shutil
 import tempfile
 import threading
@@ -14,7 +16,7 @@ from unittest.mock import patch
 
 from calendar_mcp.__main__ import main
 from calendar_mcp.changes import open_window, read_tool, socket_path
-from calendar_mcp.native import NativeBroker, NativeError, RECOVERY_CAPABILITIES
+from calendar_mcp.native import NativeBroker, NativeError, RECOVERY_CAPABILITIES, valid_recovery_capabilities
 from calendar_mcp.protocol import Protocol
 from calendar_mcp.schema import ValidationError, validate_arguments
 from calendar_mcp.security import initialize, private_directory
@@ -41,7 +43,7 @@ def recovery_preview(action="modify"):
 class RecoverySchemaTests(unittest.TestCase):
     def test_old_or_unrecognized_native_capability_never_advertises_or_dispatches_recovery(self):
         for native_result in (None, {**RECOVERY_CAPABILITIES, "version": True},
-                              {**RECOVERY_CAPABILITIES, "extra": True}, {**RECOVERY_CAPABILITIES, "local_ui": False}):
+                              {**RECOVERY_CAPABILITIES, "extra": True}, {**RECOVERY_CAPABILITIES, "local_ui": 0}):
             class Broker:
                 def recovery_capabilities(self):
                     return native_result
@@ -55,8 +57,42 @@ class RecoverySchemaTests(unittest.TestCase):
                                      "params": {"name": "preflight_rollback", "arguments": {"all": True}}})
             self.assertEqual(json.loads(reply["result"]["content"][0]["text"])["code"], "feature_unavailable")
 
+    def test_recovery_contract_accepts_only_boolean_local_ui_variation(self):
+        for local_ui in (False, True):
+            capabilities = {**RECOVERY_CAPABILITIES, "local_ui": local_ui}
+
+            class Broker:
+                def recovery_capabilities(self):
+                    return capabilities
+
+                def call(self, name, arguments):
+                    self.received = name, arguments
+                    return {}
+
+            broker = Broker()
+            protocol = Protocol(broker)
+            published = protocol.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+            self.assertEqual(len(published), 13)
+            for name, arguments in (("list_changes", {}), ("get_stored_change", {"change_id": "fixture"}),
+                                    ("preflight_rollback", {"all": True}), ("commit_rollback", {"preview": recovery_preview()})):
+                result = protocol.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                          "params": {"name": name, "arguments": arguments}})
+                self.assertFalse(result["result"]["isError"])
+                self.assertEqual(broker.received, (name, arguments))
+        invalid = [None, {}, {**RECOVERY_CAPABILITIES, "extra": True}]
+        invalid.extend({key: value for key, value in RECOVERY_CAPABILITIES.items() if key != missing}
+                       for missing in RECOVERY_CAPABILITIES)
+        invalid.extend({**RECOVERY_CAPABILITIES, "local_ui": value} for value in (None, 0, 1, "false", [], {}))
+        invalid.extend({**RECOVERY_CAPABILITIES, key: value} for key, value in
+                       (("version", True), ("version", 1.0), ("storage_version", 2.0), ("recovery", 1),
+                        ("detail_retention", 1), ("max_selection", 25.0), ("max_selection", 24)))
+        for capabilities in invalid:
+            with self.subTest(capabilities=capabilities):
+                self.assertFalse(valid_recovery_capabilities(capabilities))
+
     def test_capability_probe_is_cached_and_does_not_authorize_calendar_access(self):
-        for reply in (RECOVERY_CAPABILITIES, NativeError("unknown_operation", "Unknown operation")):
+        for reply in (RECOVERY_CAPABILITIES, {**RECOVERY_CAPABILITIES, "local_ui": False},
+                      NativeError("unknown_operation", "Unknown operation")):
             broker = object.__new__(NativeBroker)
             calls = []
 
@@ -211,6 +247,37 @@ class LocalChangesTests(unittest.TestCase):
             path.chmod(0o600)
             with self.assertRaises(ValueError):
                 open_window(state, "synthetic")
+
+    def test_socket_derivation_ignores_public_legacy_preclaim_and_tmpdir(self):
+        with tempfile.TemporaryDirectory(prefix="cmcp-", dir="/tmp") as directory:
+            native = private_directory(Path(directory) / ("Unicode e\u0301 👩🏽‍💻 " + "long" * 40))
+            fingerprint = hashlib.sha256(str(native.resolve()).encode("utf-8")).hexdigest()[:20]
+            legacy = Path("/private/tmp") / ("calendar-mcp-ui-" + str(os.getuid()) + "-" + fingerprint)
+            legacy.mkdir(mode=0o755)
+            self.addCleanup(shutil.rmtree, legacy)
+            with patch.dict(os.environ, {"TMPDIR": str(legacy)}):
+                endpoint = socket_path(native)
+            self.assertNotEqual(endpoint.parent, legacy)
+            self.assertEqual(endpoint.parent.name, "cmui-" + fingerprint)
+            self.assertEqual(endpoint.name, "s")
+            base = endpoint.parent.parent.lstat()
+            self.assertEqual(base.st_uid, os.getuid())
+            self.assertEqual(stat.S_IMODE(base.st_mode) & 0o077, 0)
+            self.assertLess(len(os.fsencode(endpoint)), 104)
+
+    def test_socket_derivation_rejects_unsafe_os_temporary_base(self):
+        with tempfile.TemporaryDirectory(prefix="cmcp-", dir="/tmp") as directory:
+            base = Path(directory)
+            native = private_directory(base / "state")
+            public = base / "public"; public.mkdir(mode=0o755); public.chmod(0o755)
+            link = base / "link"; link.symlink_to(native, target_is_directory=True)
+            for supplied in (str(public), str(link), "relative", None):
+                with self.subTest(supplied=supplied), patch("calendar_mcp.changes.os.confstr", return_value=supplied):
+                    with self.assertRaises(ValueError):
+                        socket_path(native)
+            with patch("calendar_mcp.changes.os.getuid", return_value=os.getuid() + 1):
+                with self.assertRaises(ValueError):
+                    socket_path(native)
 
     def test_history_errors_do_not_expose_native_details(self):
         class Client:

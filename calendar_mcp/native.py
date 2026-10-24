@@ -22,6 +22,14 @@ RECURRENCE_CAPABILITIES = {"version": 1, "recurrence": True, "preview_version": 
                            "max_count": 1000}
 
 
+def valid_recovery_capabilities(value):
+    """Local UI availability is optional; the remote recovery contract is exact."""
+    return (isinstance(value, dict) and set(value) == set(RECOVERY_CAPABILITIES)
+            and all(type(value[key]) is type(expected)
+                    and (key == "local_ui" or value[key] == expected)
+                    for key, expected in RECOVERY_CAPABILITIES.items()))
+
+
 class NativeError(Exception):
     def __init__(self, code, message):
         super().__init__(message)
@@ -98,8 +106,7 @@ class NativeBroker:
                 result = self.call("recovery_capabilities", {})
             except (NativeError, ValueError, OSError):
                 return None
-            if (isinstance(result, dict) and result == RECOVERY_CAPABILITIES
-                    and all(type(result[key]) is type(value) for key, value in RECOVERY_CAPABILITIES.items())):
+            if valid_recovery_capabilities(result):
                 self._recovery_capabilities = result
         return self._recovery_capabilities
 

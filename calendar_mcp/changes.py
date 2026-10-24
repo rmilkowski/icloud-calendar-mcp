@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import socket
 import stat
+import sys
 
 from .adapter import GatewayClient
 from .native import NativeError
@@ -91,10 +92,30 @@ def open_window(state, backend):
     return {"opened": True}
 
 
+def _temporary_base():
+    """Use Darwin's per-user directory, independent of attacker-controlled TMPDIR."""
+    if sys.platform != "darwin":
+        raise ValueError("Native UI requires Darwin user temporary storage")
+    # CPython does not publish this Darwin constant in every confstr_names build.
+    path = os.confstr(os.confstr_names.get("CS_DARWIN_USER_TEMP_DIR", 65537))
+    if not isinstance(path, str) or not path.startswith("/") or len(os.fsencode(path)) > 4095:
+        raise ValueError("Invalid native UI user temporary directory")
+    supplied = Path(path)
+    for directory in (supplied, supplied.resolve(strict=True)):
+        info = directory.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) & 0o077):
+            raise ValueError("Native UI temporary directory must be private and user-owned")
+    return supplied.resolve(strict=True)
+
+
 def socket_path(native):
-    """Match the native fixed, short socket path without accepting a caller path."""
+    """Match native canonical UTF-8 hashing inside protected OS user storage."""
     fingerprint = hashlib.sha256(str(Path(native).resolve(strict=True)).encode("utf-8")).hexdigest()[:20]
-    return Path("/private/tmp") / ("calendar-mcp-ui-" + str(os.getuid()) + "-" + fingerprint) / "local-ui.sock"
+    path = _temporary_base() / ("cmui-" + fingerprint) / "s"
+    if len(os.fsencode(path)) >= 104:
+        raise ValueError("Protected temporary path is too long for native UI socket")
+    return path
 
 
 def dispatch(args):

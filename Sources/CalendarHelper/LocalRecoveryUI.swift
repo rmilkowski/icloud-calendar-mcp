@@ -8,6 +8,7 @@ import Darwin
 final class LocalRecoverySocket: @unchecked Sendable {
     private let descriptor: Int32
     private let path: String
+    private let identity: LocalRecoverySocketIdentity
     init(directory: URL, openWindow: @escaping @MainActor @Sendable () -> Void) throws {
         let socketDirectory = try localRecoverySocketDirectory(stateDirectory: directory)
         var parent = stat()
@@ -15,8 +16,8 @@ final class LocalRecoverySocket: @unchecked Sendable {
             guard errno == ENOENT, mkdir(socketDirectory.path, 0o700) == 0 else { throw CoreError("unsafe_state", "Cannot create protected local UI directory") }
             guard lstat(socketDirectory.path, &parent) == 0 else { throw CoreError("unsafe_state", "Cannot inspect local UI directory") }
         }
-        guard parent.st_mode & S_IFMT == S_IFDIR, parent.st_uid == getuid(), parent.st_mode & 0o777 == 0o700 else { throw CoreError("unsafe_state", "Local UI directory must be owned, mode 0700 and not a symlink") }
-        path = socketDirectory.appendingPathComponent("local-ui.sock").path
+        try validateLocalRecoveryDirectory(socketDirectory)
+        path = socketDirectory.appendingPathComponent("s").path
         guard path.utf8.count < 104 else { throw CoreError("local_ui_unavailable", "State path is too long for local UI socket") }
         var info = stat()
         if lstat(path, &info) == 0 {
@@ -28,9 +29,15 @@ final class LocalRecoverySocket: @unchecked Sendable {
         var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
         let name = Array(path.utf8) + [0]
         withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: name) }
-        let bound = withUnsafePointer(to: &address) { pointer in pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
-        guard bound == 0, chmod(path, 0o600) == 0, listen(descriptor, 4) == 0 else { close(descriptor); throw CoreError("local_ui_unavailable", "Cannot protect local UI socket") }
         let listener = descriptor
+        let bound = withUnsafePointer(to: &address) { pointer in pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        guard bound == 0 else { close(descriptor); throw CoreError("local_ui_unavailable", "Cannot bind local UI socket") }
+        do { identity = try LocalRecoverySocketIdentity(path: path) }
+        catch { close(descriptor); throw error }
+        guard chmod(path, 0o600) == 0, listen(descriptor, 4) == 0 else {
+            close(descriptor); identity.removeIfUnchanged(path: path)
+            throw CoreError("local_ui_unavailable", "Cannot protect local UI socket")
+        }
         DispatchQueue.global(qos: .utility).async {
             while true {
                 let client = accept(listener, nil, nil)
@@ -53,7 +60,7 @@ final class LocalRecoverySocket: @unchecked Sendable {
             }
         }
     }
-    deinit { close(descriptor); unlink(path) }
+    deinit { close(descriptor); identity.removeIfUnchanged(path: path) }
 }
 
 @MainActor

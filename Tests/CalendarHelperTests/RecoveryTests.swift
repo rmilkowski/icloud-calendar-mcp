@@ -256,7 +256,7 @@ final class RecoveryTests: XCTestCase {
     func testSocketEndpointUsesPOSIXCanonicalPathAndLegacyTitlesStayBounded() throws {
         let dir = directory(), state = try store(dir), backend = fixture(), clock = RecoveryClock(), broker = Broker(state: state, backend: backend, now: { clock.value }), id = ids(broker)[0]
         let canonical = realpath(dir.path, nil)!; defer { free(canonical) }
-        let expected = "/private/tmp/calendar-mcp-ui-\(getuid())-" + String(digest(Data(String(cString: canonical).utf8)).prefix(20))
+        let expected = try localRecoveryTemporaryBase().appendingPathComponent("cmui-" + String(digest(Data(String(cString: canonical).utf8)).prefix(20))).path
         XCTAssertEqual(try localRecoverySocketDirectory(stateDirectory: dir).path, expected)
         let ordinary = call(broker, "get_event", ["event_id": id])["result"]["event"], huge = String(repeating: "Legacy title 👩🏽‍💻", count: 4000)
         var before = ordinary.object!, fields = before["fields"]!.object!; fields["title"] = .string(huge); before["fields"] = .object(fields)
@@ -268,6 +268,51 @@ final class RecoveryTests: XCTestCase {
         XCTAssertLessThan(try result.data().count, 10_000)
         XCTAssertEqual(call(broker, "get_stored_change", ["change_id": .string(nonce)])["result"]["before"]["fields"]["title"], .string(huge))
         XCTAssertEqual(try state.auditRecords().first!["approval_source"], .string("native_maintenance"))
+    }
+
+    func testLocalRecoveryTemporaryStorageRejectsSymlinksAndPublicDirectories() throws {
+        let dir = directory()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let canonical = realpath(dir.path, nil)!; defer { free(canonical) }
+        XCTAssertEqual(try validatedLocalRecoveryTemporaryBase(dir).path, String(cString: canonical))
+        XCTAssertEqual(chmod(dir.path, 0o755), 0)
+        XCTAssertThrowsError(try validatedLocalRecoveryTemporaryBase(dir))
+        XCTAssertEqual(chmod(dir.path, 0o700), 0)
+        let link = directory()
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: dir)
+        XCTAssertThrowsError(try validatedLocalRecoveryTemporaryBase(link))
+        let file = directory(); try Data().write(to: file)
+        XCTAssertThrowsError(try validatedLocalRecoveryTemporaryBase(file))
+    }
+
+    func testLocalRecoverySocketCleanupPreservesReplacementAndRejectsNonsockets() throws {
+        let dir = directory()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let socketDirectory = try localRecoverySocketDirectory(stateDirectory: dir)
+        directories.append(socketDirectory)
+        try FileManager.default.createDirectory(at: socketDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let path = socketDirectory.appendingPathComponent("s").path
+        let listener = socket(AF_UNIX, SOCK_STREAM, 0); defer { close(listener) }
+        var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { $0.copyBytes(from: Array(path.utf8) + [0]) }
+        let result = withUnsafePointer(to: &address) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        XCTAssertEqual(result, 0)
+        let identity = try LocalRecoverySocketIdentity(path: path)
+        XCTAssertEqual(unlink(path), 0)
+        try Data("replacement".utf8).write(to: URL(fileURLWithPath: path))
+        identity.removeIfUnchanged(path: path)
+        XCTAssertEqual(try String(contentsOfFile: path, encoding: .utf8), "replacement")
+        XCTAssertThrowsError(try LocalRecoverySocketIdentity(path: path))
+    }
+
+    func testRecoveryCapabilityReflectsActualOptionalListenerAvailability() throws {
+        let broker = Broker(state: try store(directory()), backend: fixture())
+        XCTAssertEqual(call(broker, "recovery_capabilities")["result"]["local_ui"], .bool(false))
+        broker.setLocalRecoveryUIAvailable(true)
+        XCTAssertEqual(call(broker, "recovery_capabilities")["result"]["local_ui"], .bool(true))
+        broker.setLocalRecoveryUIAvailable(false)
+        XCTAssertEqual(call(broker, "recovery_capabilities")["result"]["local_ui"], .bool(false))
+        XCTAssertNotEqual(call(broker, "list_changes")["result"], .null)
     }
 
     func testRetentionPolicyIsStrictAndDoesNotExtendCapturedExpiry() throws {

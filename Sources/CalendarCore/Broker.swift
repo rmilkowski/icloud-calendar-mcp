@@ -8,8 +8,13 @@ public final class Broker: @unchecked Sendable {
     let backend: any CalendarBackend
     let now: () -> Date
     let lock = NSLock()
+    private var localRecoveryUIAvailable = false
     public init(state: StateStore, backend: any CalendarBackend, now: @escaping () -> Date = Date.init) {
         self.state = state; self.backend = backend; self.now = now
+    }
+    public func setLocalRecoveryUIAvailable(_ available: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        localRecoveryUIAvailable = available
     }
     public func handle(_ request: JSON) -> JSON {
         lock.lock(); defer { lock.unlock() }
@@ -51,7 +56,7 @@ public final class Broker: @unchecked Sendable {
             return .object(["version": .int(1), "alerts": .bool(true), "max_alerts": .int(10), "preview_version": .int(2)])
         case "recovery_capabilities":
             _ = try Arguments(arguments, allowed: [])
-            return .object(["version": .int(1), "storage_version": .int(2), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(true), "max_selection": .int(25)])
+            return .object(["version": .int(1), "storage_version": .int(2), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
         case "list_changes": return try listChanges(arguments)
         case "get_stored_change": return try storedChange(arguments)
         case "preflight_rollback": return try preflightRollback(arguments)

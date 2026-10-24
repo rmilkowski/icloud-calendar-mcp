@@ -3,7 +3,7 @@
 import json
 
 from .json_values import validate_json
-from .native import ALERTS_CAPABILITIES, NativeError, RECOVERY_CAPABILITIES, RECURRENCE_CAPABILITIES
+from .native import ALERTS_CAPABILITIES, NativeError, RECURRENCE_CAPABILITIES, valid_recovery_capabilities
 from .schema import RECOVERY_TOOLS, ValidationError, tools_for_capabilities, validate_arguments
 
 VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
@@ -36,8 +36,7 @@ class Protocol:
     def __init__(self, broker):
         self.broker = broker
         capabilities = getattr(broker, "recovery_capabilities", lambda: None)()
-        self.recovery = (isinstance(capabilities, dict) and capabilities == RECOVERY_CAPABILITIES
-                         and all(type(capabilities[key]) is type(value) for key, value in RECOVERY_CAPABILITIES.items()))
+        self.recovery = valid_recovery_capabilities(capabilities)
         alerts = getattr(broker, "alerts_capabilities", lambda: None)()
         self.alerts = (isinstance(alerts, dict) and alerts == ALERTS_CAPABILITIES
                        and all(type(alerts[key]) is type(value) for key, value in ALERTS_CAPABILITIES.items()))

@@ -91,11 +91,46 @@ class NativeIntegrationTests(unittest.TestCase):
                 thread.join()
                 broker.close()
 
-    def test_native_http_retained_history_pagination_and_signed_recovery(self):
-        with tempfile.TemporaryDirectory(prefix="calendar synthetic recovery ") as directory:
+    def test_native_optional_ui_failure_preserves_broker_and_existing_endpoint(self):
+        with tempfile.TemporaryDirectory(prefix="calendar synthetic unavailable UI ") as directory:
             state = initialize(Path(directory) / "gateway")
+            native = private_directory(state / "native-synthetic")
+            endpoint = socket_path(native)
+            private_directory(endpoint.parent)
+            endpoint.write_bytes(b"unrelated protected endpoint")
+            endpoint.chmod(0o600)
+            broker = None
+            try:
+                broker = NativeBroker(HELPER, native, "synthetic", credential_binding="c" * 64)
+                capabilities = broker.call("recovery_capabilities", {})
+                self.assertIs(capabilities["local_ui"], False)
+                self.assertEqual(broker.recovery_capabilities(), capabilities)
+                protocol = Protocol(broker)
+                tools = protocol.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+                self.assertEqual(len(tools), 13)
+                result = protocol.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list_changes"}})
+                self.assertFalse(result["result"]["isError"])
+                self.assertEqual(result["result"]["structuredContent"]["changes"], [])
+                self.assertEqual(broker.call("authorization_status", {})["authorization_status"], "not_applicable")
+                self.assertEqual(broker.call("list_calendars", {})["calendars"][0]["source"], "Synthetic")
+                self.assertEqual(broker.call("list_changes", {})["changes"], [])
+                self.assertEqual(endpoint.read_bytes(), b"unrelated protected endpoint")
+            finally:
+                if broker is not None:
+                    broker.close()
+                self.assertEqual(endpoint.read_bytes(), b"unrelated protected endpoint")
+                endpoint.unlink()
+                endpoint.parent.rmdir()
+
+    def test_native_http_retained_history_pagination_and_signed_recovery(self):
+        with tempfile.TemporaryDirectory(prefix="calendar synthetic recovery e\u0301 👩🏽‍💻 ") as directory:
+            state = initialize(Path(directory) / ("long-state-" * 15))
             token = read_token(state)
             native = private_directory(state / "native-synthetic")
+            fingerprint = hashlib.sha256(str(native.resolve()).encode("utf-8")).hexdigest()[:20]
+            legacy = Path("/private/tmp") / ("calendar-mcp-ui-" + str(os.getuid()) + "-" + fingerprint)
+            legacy.mkdir(mode=0o755); legacy.chmod(0o755)
+            self.addCleanup(legacy.rmdir)
             broker = NativeBroker(HELPER, native, "synthetic", credential_binding=hashlib.sha256(token.encode()).hexdigest())
             if broker.recovery_capabilities() is None:
                 broker.close()
@@ -104,6 +139,8 @@ class NativeIntegrationTests(unittest.TestCase):
             # using a long state path; no review window or Apply control is opened.
             try:
                 endpoint = socket_path(native)
+                self.assertNotEqual(endpoint.parent, legacy)
+                self.assertEqual(stat.S_IMODE(legacy.stat().st_mode), 0o755)
                 endpoint_info = endpoint.lstat()
                 self.assertTrue(stat.S_ISSOCK(endpoint_info.st_mode))
                 self.assertEqual(stat.S_IMODE(endpoint_info.st_mode), 0o600)

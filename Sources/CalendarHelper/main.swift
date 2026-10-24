@@ -98,7 +98,10 @@ do {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let recoveryWindow = LocalRecoveryWindow(broker: broker)
-        let recoverySocket = try LocalRecoverySocket(directory: state.directory) { recoveryWindow.open() }
+        // The open-only window is optional; a failed local listener must not stop
+        // the authenticated broker or weaken the native Apply review gate.
+        let recoverySocket = try? LocalRecoverySocket(directory: state.directory) { recoveryWindow.open() }
+        broker.setLocalRecoveryUIAvailable(recoverySocket != nil)
         let maintenance = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         maintenance.schedule(deadline: .now() + 60, repeating: 60)
         maintenance.setEventHandler { _ = broker.maintainRecoveryDetails() }; maintenance.resume()
