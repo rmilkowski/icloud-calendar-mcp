@@ -5,7 +5,9 @@ import CryptoKit
 import Darwin
 @testable import CalendarCore
 
-private final class RecoveryClock { var value = try! parseDate("2026-10-24T12:00:00Z") }
+// Stay ahead of StateStore's real startup high-water mark while retaining exact
+// synthetic expiry boundaries, including clock rollback and restart scenarios.
+private final class RecoveryClock { var value = Date().addingTimeInterval(3600) }
 
 final class RecoveryTests: XCTestCase {
     private var directories: [URL] = []
