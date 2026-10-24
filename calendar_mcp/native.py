@@ -20,14 +20,26 @@ RECURRENCE_CAPABILITIES = {"version": 1, "recurrence": True, "preview_version": 
                            "delete_occurrence": True, "future_scope": False,
                            "series_modify_delete": False, "delete_recovery": "standalone_copy",
                            "max_count": 1000}
+SERIES_MODIFICATION_CAPABILITIES = {
+    "version": 1, "storage_version": 3, "preview_version": 4, "current_series_modify": True,
+    "fields": ["title", "notes", "location", "alerts"], "inverse_field_recovery": True,
+    "future_scope": False, "series_delete": False, "structural_changes": False,
+    "commit_tools": ["commit_series_modify", "commit_series_rollback"]}
 
 
 def valid_recovery_capabilities(value):
     """Local UI availability is optional; the remote recovery contract is exact."""
     return (isinstance(value, dict) and set(value) == set(RECOVERY_CAPABILITIES)
             and all(type(value[key]) is type(expected)
-                    and (key == "local_ui" or value[key] == expected)
+                    and (key == "local_ui" or (value[key] in (2, 3) if key == "storage_version" else value[key] == expected))
                     for key, expected in RECOVERY_CAPABILITIES.items()))
+
+
+def valid_series_modification_capabilities(value):
+    return (isinstance(value, dict) and value == SERIES_MODIFICATION_CAPABILITIES
+            and all(type(value[key]) is type(expected)
+                    for key, expected in SERIES_MODIFICATION_CAPABILITIES.items())
+            and all(type(item) is str for key in ("fields", "commit_tools") for item in value[key]))
 
 
 class NativeError(Exception):
@@ -137,6 +149,19 @@ class NativeBroker:
                     and all(type(result[key]) is type(value) for key, value in RECURRENCE_CAPABILITIES.items())):
                 self._recurrence_capabilities = result
         return self._recurrence_capabilities
+
+    def series_modification_capabilities(self):
+        """Probe current-pattern field editing independently from version-3 recurrence."""
+        if not getattr(self, "_series_modification_capabilities_checked", False):
+            self._series_modification_capabilities_checked = True
+            self._series_modification_capabilities = None
+            try:
+                result = self.call("series_modification_capabilities", {})
+            except (NativeError, ValueError, OSError):
+                return None
+            if valid_series_modification_capabilities(result):
+                self._series_modification_capabilities = result
+        return self._series_modification_capabilities
 
     def _wait_io(self, readers, writers, deadline):
         while True:

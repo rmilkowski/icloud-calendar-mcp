@@ -57,9 +57,9 @@ class RecoverySchemaTests(unittest.TestCase):
                                      "params": {"name": "preflight_rollback", "arguments": {"all": True}}})
             self.assertEqual(json.loads(reply["result"]["content"][0]["text"])["code"], "feature_unavailable")
 
-    def test_recovery_contract_accepts_only_boolean_local_ui_variation(self):
-        for local_ui in (False, True):
-            capabilities = {**RECOVERY_CAPABILITIES, "local_ui": local_ui}
+    def test_recovery_contract_accepts_known_storage_and_boolean_local_ui_variation(self):
+        for storage_version, local_ui in ((2, False), (2, True), (3, False), (3, True)):
+            capabilities = {**RECOVERY_CAPABILITIES, "storage_version": storage_version, "local_ui": local_ui}
 
             class Broker:
                 def recovery_capabilities(self):
@@ -84,7 +84,8 @@ class RecoverySchemaTests(unittest.TestCase):
                        for missing in RECOVERY_CAPABILITIES)
         invalid.extend({**RECOVERY_CAPABILITIES, "local_ui": value} for value in (None, 0, 1, "false", [], {}))
         invalid.extend({**RECOVERY_CAPABILITIES, key: value} for key, value in
-                       (("version", True), ("version", 1.0), ("storage_version", 2.0), ("recovery", 1),
+                       (("version", True), ("version", 1.0), ("storage_version", 2.0), ("storage_version", 4),
+                        ("storage_version", True), ("recovery", 1),
                         ("detail_retention", 1), ("max_selection", 25.0), ("max_selection", 24)))
         for capabilities in invalid:
             with self.subTest(capabilities=capabilities):
@@ -92,6 +93,7 @@ class RecoverySchemaTests(unittest.TestCase):
 
     def test_capability_probe_is_cached_and_does_not_authorize_calendar_access(self):
         for reply in (RECOVERY_CAPABILITIES, {**RECOVERY_CAPABILITIES, "local_ui": False},
+                      {**RECOVERY_CAPABILITIES, "storage_version": 3, "local_ui": False},
                       NativeError("unknown_operation", "Unknown operation")):
             broker = object.__new__(NativeBroker)
             calls = []

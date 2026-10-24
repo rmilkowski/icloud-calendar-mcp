@@ -132,6 +132,39 @@ RECURRENCE_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
 RECURRENCE_PREVIEW = obj({"envelope": RECURRENCE_ENVELOPE,
                           "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
 
+SERIES_FIELD_NAMES = ("title", "notes", "location", "alerts")
+SERIES_REFERENCE = obj({"provider_scope": string(enum=["current_pattern_from_first_occurrence"]),
+                        "selected": EVENT,
+                        "changed_fields": {"type": "array", "minItems": 1, "maxItems": 4,
+                                           "uniqueItems": True, "items": string(enum=list(SERIES_FIELD_NAMES))}},
+                       ("provider_scope", "selected", "changed_fields"))
+SERIES_LIMITATIONS = [
+    "Applies changed default fields to the provider's current recurring pattern from its first occurrence, including past and future occurrences in that pattern. Separate series segments are not merged.",
+    "Detached occurrence overrides and exclusions are controlled by the provider. This operation does not verify every occurrence or guarantee that every detached override receives the same values.",
+    "Recovery reapplies only the retained prior default fields to the same current pattern. It does not reconstruct detached overrides, exclusions, prior series structure, provider identities or earlier split segments.",
+    "One series operation can affect an unbounded number of occurrences and consumes one modify intent under the installation-wide safety limits."]
+SERIES_LIMITATION_SCHEMA = {"type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": True,
+                            "items": string(2000, enum=SERIES_LIMITATIONS)}
+SERIES_RECOVERY = obj({"mode": string(enum=["series_default_fields"]),
+                       "limitations": SERIES_LIMITATION_SCHEMA}, ("mode", "limitations"))
+SERIES_AFTER = {**SNAPSHOT_FIELDS, "properties": {**SNAPSHOT_FIELDS["properties"], "alerts": ALERTS}}
+SERIES_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
+    "version": {"type": "integer", "enum": [4]}, "action": string(enum=["modify"]),
+    "scope": string(enum=["series"]), "before": EVENT, "after": SERIES_AFTER,
+    "series": SERIES_REFERENCE, "recovery": SERIES_RECOVERY},
+    "required": [*ENVELOPE["required"], "series", "recovery"]}
+SERIES_PREVIEW = obj({"envelope": SERIES_ENVELOPE, "authentication_tag": string(256, minLength=1)},
+                     ("envelope", "authentication_tag"))
+SERIES_ROLLBACK = {**ROLLBACK, "properties": {**ROLLBACK["properties"],
+    "source_change_ids": {**CHANGE_IDS, "maxItems": 1}, "restoration": {"type": "null"},
+    "alarm_restoration": {**RAW_ALARMS, "type": ["array", "null"]}, "limitations": SERIES_LIMITATION_SCHEMA},
+    "required": [*ROLLBACK["required"], "alarm_restoration"]}
+SERIES_ROLLBACK_ENVELOPE = {**SERIES_ENVELOPE, "properties": {**SERIES_ENVELOPE["properties"],
+    "after": SNAPSHOT_FIELDS, "rollback": SERIES_ROLLBACK},
+    "required": [*SERIES_ENVELOPE["required"], "rollback"]}
+SERIES_ROLLBACK_PREVIEW = obj({"envelope": SERIES_ROLLBACK_ENVELOPE,
+                              "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+
 
 def tool(name, description, schema, *, write=False, destructive=False):
     return {"name": name, "description": description, "inputSchema": schema,
@@ -191,8 +224,24 @@ for _tool in RECURRENCE_TOOLS:
         }[_tool["name"]] + " The preview is the complete execution payload. After an uncertain transport result, get_change_status reads its nonce without retrying the write."
 
 
-def tools_for_capabilities(*, alerts, recurrence=False):
-    return RECURRENCE_TOOLS if recurrence and alerts else TOOLS if alerts else LEGACY_TOOLS
+SERIES_MODIFICATION_TOOLS = deepcopy(RECURRENCE_TOOLS)
+for _tool in SERIES_MODIFICATION_TOOLS:
+    if _tool["name"] == "preflight_change":
+        _tool["description"] = _tool["description"].replace(
+            "Modify/delete address one identified event or occurrence with scope this. Future-occurrence and whole-series modification/deletion are unsupported.",
+            "Modify one identified event or occurrence with scope this, or change current recurring pattern default title, notes, plain location or alerts with scope series and event_id. Series edits cover the provider's current pattern from its first occurrence, including past and future occurrences in that pattern; detached overrides and exclusions remain provider-controlled. Date/time, timezone, all-day, recurrence and calendar changes, future scope and series deletion are unsupported. A series edit may affect an unbounded number of occurrences and uses one modify intent.")
+    elif _tool["name"] == "preflight_rollback":
+        _tool["description"] += " A series default-field change requires exactly one source change selected alone; mixed series/occurrence or multiple-source recovery is rejected. Route each step through its returned commit_tool: commit_rollback for legacy recovery or commit_series_rollback for version-4 series recovery. The routing hint cannot replace native preview validation."
+SERIES_MODIFICATION_TOOLS.extend([
+    tool("commit_series_modify", "Apply only the masked default-field changes in this complete version-4 native-authenticated preview to the provider's current recurring pattern from its first occurrence. The preview shows the selected reference occurrence, complete first-anchor before/after fields, exact changed_fields and signed series_default_fields recovery limitations. Only title, notes, plain location and alerts defaults can change. A series edit may affect an unbounded number of occurrences and consumes one modify intent. Detached overrides and exclusions are provider-controlled; earlier split segments are not merged. The preview is the complete execution payload. After uncertain transport results, query get_change_status by its nonce without retrying the write.",
+         obj({"preview": SERIES_PREVIEW}, ("preview",)), write=True, destructive=True),
+    tool("commit_series_rollback", "Reapply only one source change's retained prior default fields to the same current recurring pattern using this complete version-4 native-authenticated inverse-field preview. The preview signs the current first-anchor state, exact changed_fields, restoration values and series_default_fields limitations. Recovery does not reconstruct recurrence structure, detached overrides, exclusions, provider identities or prior split segments. This is a new journalled series modify intent with current stale and safety checks. After uncertain transport results, query get_change_status by its nonce without retrying the write.",
+         obj({"preview": SERIES_ROLLBACK_PREVIEW}, ("preview",)), write=True, destructive=True)])
+
+
+def tools_for_capabilities(*, alerts, recurrence=False, series_modification=False):
+    return (SERIES_MODIFICATION_TOOLS if series_modification and recurrence and alerts else
+            RECURRENCE_TOOLS if recurrence and alerts else TOOLS if alerts else LEGACY_TOOLS)
 
 
 class ValidationError(ValueError):
@@ -264,8 +313,9 @@ def validate(value, schema, path="arguments", depth=0):
                 raise ValidationError(path + " requires a recognized IANA time zone") from None
 
 
-def validate_arguments(name, arguments, *, alerts=True, recurrence=False):
-    tools = {item["name"]: item for item in tools_for_capabilities(alerts=alerts, recurrence=recurrence)}
+def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series_modification=False):
+    tools = {item["name"]: item for item in tools_for_capabilities(alerts=alerts, recurrence=recurrence,
+                                                               series_modification=series_modification)}
     if name not in tools:
         raise ValidationError("Unknown tool")
     validate(arguments, tools[name]["inputSchema"])
@@ -274,8 +324,14 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False):
         fields = arguments.get("fields")
         series = arguments["scope"] == "series"
         rule = fields.get("recurrence") if fields else None
-        if series != (action == "create" and rule is not None) or (rule is not None and action != "create"):
+        series_edit = series_modification and recurrence and alerts and series and action == "modify"
+        if ((not series_edit and series != (action == "create" and rule is not None))
+                or (rule is not None and action != "create")):
             raise ValidationError("Only series creation accepts and requires recurrence; modify/delete require scope this")
+        if series_edit and (not fields or set(fields) - set(SERIES_FIELD_NAMES)):
+            raise ValidationError("Series modification requires only title, notes, plain location or alerts")
+        if series_edit and "title" in fields and not fields["title"].strip():
+            raise ValidationError("Series title must not be blank")
         if rule is not None:
             validate_recurrence(rule)
         if action == "create":
@@ -294,8 +350,11 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False):
                 if key in normalized:
                     raise ValidationError("Alerts must not contain duplicate triggers")
                 normalized.append(key)
-    if name.startswith("commit_") and name != "commit_rollback" and arguments["preview"]["envelope"]["action"] != name.removeprefix("commit_"):
+    if (name.startswith("commit_") and name not in ("commit_rollback", "commit_series_rollback")
+            and arguments["preview"]["envelope"]["action"] != ("modify" if name == "commit_series_modify" else name.removeprefix("commit_"))):
         raise ValidationError("Preview action does not match commit tool")
+    if name in ("commit_series_modify", "commit_series_rollback"):
+        validate_series_preview(arguments["preview"]["envelope"], rollback=name == "commit_series_rollback")
     if name in ("commit_create", "commit_modify", "commit_delete") and arguments["preview"]["envelope"]["version"] == 3:
         envelope = arguments["preview"]["envelope"]
         action, before, after = envelope["action"], envelope["before"], envelope["after"]
@@ -335,3 +394,42 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False):
 def validate_recurrence(rule):
     if "days_of_week" in rule and rule["frequency"] != "weekly":
         raise ValidationError("days_of_week is supported only for weekly recurrence")
+
+
+def validate_series_preview(envelope, *, rollback):
+    before, after, series = envelope["before"], envelope["after"], envelope["series"]
+    changed = series["changed_fields"]
+    if changed != sorted(changed):
+        raise ValidationError("Series changed_fields must be sorted and unique")
+    if envelope["recovery"]["limitations"] != SERIES_LIMITATIONS:
+        raise ValidationError("Series preview requires the exact recovery limitations")
+    selected = series["selected"]
+    if (not before["recurring"] or before["detached"] or not selected["recurring"] or selected["detached"]
+            or before["calendar"] != envelope["calendar"] or selected["calendar"] != envelope["calendar"]
+            or before["occurrence"] is None or selected["occurrence"] is None):
+        raise ValidationError("Series preview requires the current pattern anchor and selected calendar")
+    validate(before["occurrence"], STAMP)
+    validate(selected["occurrence"], STAMP)
+    if (datetime.fromisoformat(before["occurrence"].replace("Z", "+00:00"))
+            > datetime.fromisoformat(selected["occurrence"].replace("Z", "+00:00"))):
+        raise ValidationError("Series first occurrence must not be later than the selected occurrence")
+    if before["id"] == selected["id"] and before != selected:
+        raise ValidationError("One series reference identity requires the same signed snapshot")
+    for field, value in before["fields"].items():
+        if field not in changed and after[field] != value:
+            raise ValidationError("Series preview changes an unmasked field")
+    if rollback:
+        recovery = envelope["rollback"]
+        if (selected != before or recovery["limitations"] != SERIES_LIMITATIONS
+                or (recovery["alarm_restoration"] is not None) != ("alerts" in changed)):
+            raise ValidationError("Series recovery requires exact limitations and masked alarm restoration")
+    else:
+        if ("alerts" in after) != ("alerts" in changed):
+            raise ValidationError("Series alerts must match the exact changed_fields mask")
+        for field in changed:
+            if field != "alerts":
+                validate(after[field], FIELDS["properties"][field])
+        if "title" in changed and not after["title"].strip():
+            raise ValidationError("Series title must not be blank")
+        if "alerts" not in changed and all(after[field] == before["fields"][field] for field in changed):
+            raise ValidationError("Series modification must change at least one default field")

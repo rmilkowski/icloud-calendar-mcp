@@ -121,6 +121,7 @@ final class CommitObservationTests: XCTestCase {
             _ = try state.append(event: "commit_rejected", nonce: nil, payload: .object(["op": .string("commit_modify"), "code": .string("unresolved_write")]))
             for table in tables { snapshots[table] = try state.rows("SELECT * FROM " + table + " ORDER BY rowid") }
             // Model an existing v2 installation before the additive accounting migration.
+            try state.execute("UPDATE metadata SET value='2' WHERE key='recovery_storage_version'")
             try state.execute("DROP TABLE commit_observations")
             try state.execute("DROP TABLE commit_observation_clock")
         }

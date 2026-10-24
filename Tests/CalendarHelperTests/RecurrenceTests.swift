@@ -118,14 +118,18 @@ final class RecurrenceTests: XCTestCase {
         XCTAssertEqual(backend.writeCount, 0); XCTAssertEqual(try state.rows("SELECT nonce FROM executions").count, 0)
     }
 
-    func testIndividualModificationPreservesOtherOccurrenceAndRejectsWidenedScope() throws {
+    func testIndividualModificationPreservesOtherOccurrenceAndSeparatesSeriesConsentScope() throws {
         let state = try state(), backend = SyntheticBackend(), broker = Broker(state: state, backend: backend)
         let created = commit(broker, create(broker, recurrence: rule(end: .object(["count": .int(2)])))), id = created["result"]["event"]["id"]
         var second = backend.events[0]; second.occurrence = "2026-11-01T10:00:00.000Z"; second.fields.start = "2026-11-01T10:00:00.000Z"; second.fields.end = "2026-11-01T11:00:00.000Z"; backend.events.append(second)
         let changed = draft(broker, id: id, action: "modify", fields: .object(["title": .string("One occurrence")]))
         XCTAssertEqual(changed["result"]["preview"]["envelope"]["recovery"]["limitations"], .array([.string(Broker.occurrenceRecoveryLimitation)]))
         XCTAssertEqual(commit(broker, changed["result"]["preview"], action: "modify")["result"]["state"], .string("applied")); XCTAssertEqual(backend.events[1], second)
-        for scope in ["future", "series"] { for action in ["modify", "delete"] { XCTAssertEqual(draft(broker, id: id, action: action, fields: action == "modify" ? .object(["title": .string("Widen")]) : nil, scope: scope)["error"]["code"], .string("unsupported_scope")) } }
+        for action in ["modify", "delete"] { XCTAssertEqual(draft(broker, id: id, action: action, fields: action == "modify" ? .object(["title": .string("Widen")]) : nil, scope: "future")["error"]["code"], .string("unsupported_scope")) }
+        XCTAssertEqual(draft(broker, id: id, action: "delete", scope: "series")["error"]["code"], .string("unsupported_scope"))
+        let series = draft(broker, id: id, action: "modify", fields: .object(["title": .string("Series default")]), scope: "series")["result"]["preview"]
+        XCTAssertEqual(series["envelope"]["version"], .int(4))
+        XCTAssertNotEqual(commit(broker, series, action: "modify")["error"], .null)
         for recurrence: JSON in [rule(), .null] { XCTAssertEqual(draft(broker, id: id, action: "modify", fields: .object(["recurrence": recurrence]))["error"]["code"], .string("unsupported_scope")) }
     }
 

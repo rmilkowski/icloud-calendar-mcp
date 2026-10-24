@@ -168,6 +168,7 @@ extension Broker {
     }
     func rollbackStep(_ sources: [[String]], selectionID: String, validateAlarmRestoration: Bool = true) throws -> JSON {
         guard let first = sources.first, let last = sources.last, sources.count <= 25 else { throw CoreError("invalid_selection", "Empty rollback group") }
+        try rejectSeriesCrossing(sources)
         let held = try state.recoveryHeldNonces()
         for row in sources { guard try changeSummary(row, held: held)["recovery_eligible"] == .bool(true) else { throw CoreError("rollback_ineligible", "A selected change is expired, unverified, consumed or unsupported") } }
         let marker = try JSON.parse(Data(first[1].utf8)), eventID = marker["event_id"].string!
@@ -215,11 +216,17 @@ extension Broker {
         guard try envelope.data().count <= 262_144 else { throw CoreError("preview_too_large", "Rollback review is too large") }
         let tag = HMAC<SHA256>.authenticationCode(for: try envelope.data(), using: try signingKey())
         _ = last
-        return .object(["preview": .object(["envelope": envelope, "authentication_tag": .string(Data(tag).base64EncodedString())]), "safety": try state.writeSafety(action: action, now: issued)])
+        return .object(["preview": .object(["envelope": envelope, "authentication_tag": .string(Data(tag).base64EncodedString())]), "safety": try state.writeSafety(action: action, now: issued), "commit_tool": .string("commit_rollback")])
     }
     func preflightRollback(_ arguments: JSON) throws -> JSON {
         guard try !state.hasUnresolved() else { throw CoreError("unresolved_write", "Resolve earlier unknown outcomes before any rollback") }
         let rows = try selectedRows(arguments), selection = UUID().uuidString
+        let seriesSources = try rows.filter { try isSeriesExecution($0) }
+        if !seriesSources.isEmpty {
+            guard rows.count == 1 else { throw CoreError("invalid_selection", "Select one series change alone; mixed or multiple series recovery is unsupported") }
+            let step = try seriesRollbackStep(rows, selectionID: selection)
+            return .object(["selection_id": .string(selection), "selected_change_ids": .array(rows.map { .string($0[0]) }), "selected_count": .int(1), "step_count": .int(1), "steps": .array([step]), "atomic": .bool(false), "limitations": .array(Self.seriesLimitations.map(JSON.string))])
+        }
         let grouped = try Dictionary(grouping: rows) { try JSON.parse(Data($0[1].utf8))["event_id"].string ?? "" }
         guard grouped[""] == nil else { throw CoreError("rollback_ineligible", "Selected change has no recoverable event identity") }
         let steps = try grouped.values.sorted { Int($0.first![7])! < Int($1.first![7])! }.map { try rollbackStep($0, selectionID: selection) }
@@ -248,6 +255,7 @@ extension Broker {
         do {
             try state.expireRecoveryDetails(now: now())
             guard let action = preview["envelope"]["action"].string, ["create", "modify"].contains(action) else { throw CoreError("invalid_preview", "Invalid rollback action") }
+            if preview["envelope"]["version"] == .int(4) { return .object(["result": try commitSeries(.object(["preview": preview]), rollback: true)]) }
             return .object(["result": try commit(.object(["preview": preview]), action: action, rollback: true)])
         } catch {
             let e = error as? CoreError ?? CoreError("native_error", "Native rollback failed safely")

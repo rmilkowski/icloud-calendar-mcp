@@ -41,6 +41,42 @@ final class EventKitBackend: CalendarBackend {
     func get(nativeID: String, calendarID: String, occurrence: String?, knownStart: Date) throws -> EventRecord {
         try refresh(); return try record(resolve(nativeID: nativeID, calendarID: calendarID, occurrence: occurrence, knownStart: knownStart))
     }
+    private func firstSeriesEvent(for selected: EventRecord) throws -> EKEvent {
+        guard selected.recurring, !selected.detached, let occurrence = selected.occurrence,
+              let first = store.calendarItem(withIdentifier: selected.nativeID) as? EKEvent,
+              first.calendar.calendarIdentifier == selected.calendarNativeID, first.calendarItemIdentifier == selected.nativeID,
+              first.hasRecurrenceRules, !first.isDetached, let firstDate = first.occurrenceDate,
+              firstDate <= (try parseDate(occurrence)) else { throw CoreError("ambiguous_occurrence", "Current series first occurrence cannot be established") }
+        return first
+    }
+    func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord {
+        try refresh(); return try record(firstSeriesEvent(for: selected))
+    }
+    func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord {
+        try refresh()
+        guard let calendar = store.calendar(withIdentifier: anchor.calendarNativeID), self.calendar(calendar).writable else { throw CoreError("read_only", "Calendar is no longer writable") }
+        let event = try firstSeriesEvent(for: anchor)
+        guard try record(event) == anchor, !event.hasAttendees, event.organizer == nil else { throw CoreError("stale_event", "Series anchor changed immediately before write") }
+        if changedFields.contains("title"), fields.title != anchor.fields.title { event.title = fields.title }
+        if changedFields.contains("notes"), fields.notes != anchor.fields.notes { event.notes = fields.notes }
+        if changedFields.contains("location"), fields.location != anchor.fields.location { event.location = fields.location }
+        if changedFields.contains("alerts") {
+            if let restoredAlarms { event.alarms = try self.restoredAlarms(restoredAlarms) }
+            else { guard let alerts = fields.alerts else { throw CoreError("invalid_fields", "Missing series alerts") }; event.alarms = try alerts.map { alert in
+                if let at = alert.at { return EKAlarm(absoluteDate: try parseDate(at)) }
+                return EKAlarm(relativeOffset: Double(alert.relativeMinutes!) * 60)
+            } }
+        }
+        // Only default properties above are assigned; recurrence and dates remain
+        // provider-owned. Starting at its authoritative first occurrence covers
+        // this current pattern, without merging prior split segments.
+        try store.save(event, span: .futureEvents, commit: true)
+        let saved = try record(event) // Direct save-result identity provenance.
+        try refresh()
+        let verified = try record(firstSeriesEvent(for: saved))
+        guard verified.nativeID == saved.nativeID, verified.calendarNativeID == anchor.calendarNativeID else { throw CoreError("verification_failed", "Saved current series identity is unavailable") }
+        return verified
+    }
     func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord? {
         try apply(action: action, calendarID: calendarID, existing: existing, fields: fields, alarmRestoration: nil)
     }

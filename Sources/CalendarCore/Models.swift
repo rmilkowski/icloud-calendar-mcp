@@ -143,6 +143,8 @@ public struct EventRecord: Equatable {
 }
 
 public protocol CalendarBackend: AnyObject {
+    func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord
+    func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord
     func calendars() throws -> [CalendarRecord]
     func query(start: Date, end: Date, calendarIDs: [String]) throws -> [EventRecord]
     func get(nativeID: String, calendarID: String, occurrence: String?, knownStart: Date) throws -> EventRecord
@@ -153,6 +155,8 @@ public protocol CalendarBackend: AnyObject {
 }
 
 public extension CalendarBackend {
+    func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord { throw CoreError("unsupported_scope", "Backend cannot establish the current series first occurrence") }
+    func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord { throw CoreError("unsupported_scope", "Backend cannot modify current series defaults") }
     func applyRestoringAlarms(calendarID: String, existing: EventRecord, fields: EventFields, alarms: JSON) throws -> EventRecord? {
         throw CoreError("unsupported_restore", "Backend cannot restore retained alarms")
     }
@@ -194,6 +198,29 @@ public final class SyntheticBackend: CalendarBackend {
         let index = events.firstIndex { $0.nativeID == existing.nativeID && $0.occurrence == existing.occurrence }!
         var details = events[index].details.object ?? [:]; details["alarms"] = alarms; events[index].details = .object(details)
         return events[index]
+    }
+    public func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord {
+        guard selected.recurring, !selected.detached, selected.occurrence != nil else { throw CoreError("unsupported_scope", "Select a non-detached recurring occurrence") }
+        let candidates = events.filter { $0.nativeID == selected.nativeID && $0.calendarNativeID == selected.calendarNativeID && $0.recurring && !$0.detached && $0.occurrence != nil }
+        guard let firstDate = candidates.compactMap(\.occurrence).min() else { throw CoreError("event_missing", "Series first occurrence is unavailable") }
+        let first = candidates.filter { $0.occurrence == firstDate }
+        guard first.count == 1 else { throw CoreError("identity_ambiguous", "Series first occurrence is ambiguous") }
+        return first[0]
+    }
+    public func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord {
+        guard try firstSeriesOccurrence(for: anchor) == anchor else { throw CoreError("stale_event", "Series anchor changed before write") }
+        writeCount += 1
+        for index in events.indices where events[index].nativeID == anchor.nativeID && events[index].calendarNativeID == anchor.calendarNativeID && events[index].recurring && !events[index].detached {
+            if changedFields.contains("title") { events[index].fields.title = fields.title }
+            if changedFields.contains("notes") { events[index].fields.notes = fields.notes }
+            if changedFields.contains("location") { events[index].fields.location = fields.location }
+            if changedFields.contains("alerts") {
+                var details = events[index].details.object ?? [:]
+                details["alarms"] = restoredAlarms ?? .array((fields.alerts ?? []).map(\.rawAlarm)); events[index].details = .object(details)
+            }
+        }
+        if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-write failure") }
+        return try firstSeriesOccurrence(for: anchor)
     }
     public func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord? {
         writeCount += 1
