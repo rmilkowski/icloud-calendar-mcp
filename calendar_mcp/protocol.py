@@ -1,6 +1,8 @@
 """Stateless JSON-RPC MCP subset: tools, initialization and ping."""
 
 import json
+
+from .json_values import validate_json
 from .native import ALERTS_CAPABILITIES, NativeError, RECOVERY_CAPABILITIES, RECURRENCE_CAPABILITIES
 from .schema import RECOVERY_TOOLS, ValidationError, tools_for_capabilities, validate_arguments
 
@@ -22,18 +24,7 @@ def loads(data, *, max_depth=20):
     def reject_constant(_):
         raise ValueError("Non-finite JSON number")
     value = json.loads(data, object_pairs_hook=pairs, parse_constant=reject_constant)
-    def bound(item, depth=0):
-        if depth > max_depth:
-            raise ValueError("JSON nesting exceeds limit")
-        if isinstance(item, dict):
-            for child in item.values():
-                bound(child, depth + 1)
-        elif isinstance(item, list):
-            if len(item) > 10000:
-                raise ValueError("JSON array exceeds limit")
-            for child in item:
-                bound(child, depth + 1)
-    bound(value)
+    validate_json(value, max_depth=max_depth)
     return value
 
 
@@ -57,6 +48,10 @@ class Protocol:
                       if self.recovery or item["name"] not in RECOVERY_TOOLS]
 
     def handle(self, request):
+        try:
+            validate_json(request)
+        except (ValueError, RecursionError):
+            return error(None, -32600, "Invalid JSON-RPC request")
         if not isinstance(request, dict):
             return error(None, -32600, "Expected one JSON-RPC object; batching unsupported")
         identifier = request.get("id")

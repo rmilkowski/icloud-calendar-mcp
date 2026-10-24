@@ -16,7 +16,7 @@ import unittest
 from calendar_mcp.adapter import GatewayClient, run_stdio
 from calendar_mcp.native import ALERTS_CAPABILITIES, NativeBroker, NativeError, RECOVERY_CAPABILITIES
 from calendar_mcp.protocol import Protocol, VERSIONS, loads
-from calendar_mcp.schema import TOOLS, ValidationError, validate_arguments
+from calendar_mcp.schema import TOOLS, ValidationError, validate, validate_arguments
 from calendar_mcp.security import initialize, read_token
 from calendar_mcp.server import GatewayServer, MAX_BODY
 
@@ -69,9 +69,22 @@ class SchemaTests(unittest.TestCase):
                 validate_arguments(name, arguments)
 
     def test_duplicate_keys_nonfinite_and_deep_json_rejected(self):
-        for wire in ('{"x":1,"x":2}', '{"x":NaN}', '[' * 25 + '1' + ']' * 25):
+        for wire in ('{"x":1,"x":2}', '{"x":NaN}', '{"x":1e999}', '{"x":-1e999}',
+                     '{"x":[{"nested":1e999}]}', '{"x":"\\ud800"}', '{"\\udfff":0}',
+                     '[' * 25 + '1' + ']' * 25):
             with self.assertRaises(ValueError):
                 loads(wire)
+        self.assertEqual(loads('{"🗓":"\\ud83d\\uddd3"}'), {"🗓": "🗓"})
+
+    def test_direct_schema_validation_checks_unrestricted_nested_json(self):
+        schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": True}
+        for value in ({"title": "\ud800"}, {"\udfff": 0}, {"nested": [{"number": float("inf")}]},
+                      {"nested": {1: "not a string key"}}):
+            with self.subTest(value=repr(value)), self.assertRaises(ValidationError):
+                validate(value, schema)
+        with self.assertRaises(ValidationError):
+            validate_arguments("get_event", {"event_id": "\ud800"})
+        validate_arguments("get_event", {"event_id": "🗓"})
 
 
 class ProtocolTests(unittest.TestCase):
@@ -93,6 +106,12 @@ class ProtocolTests(unittest.TestCase):
                  {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "commit_delete", "arguments": {}}}]
         for wire in wires:
             self.protocol.handle(wire)
+        self.assertEqual(self.broker.calls, [])
+
+    def test_direct_invalid_unicode_and_nonfinite_requests_never_dispatch(self):
+        for value in ("\ud800", {"\udfff": 0}, {"nested": [float("inf")]}):
+            response = self.protocol.handle(request("tools/call", {"name": "get_event", "arguments": {"event_id": value}}))
+            self.assertEqual(response["error"]["code"], -32600)
         self.assertEqual(self.broker.calls, [])
 
     def test_native_errors_are_tool_errors(self):
@@ -228,6 +247,9 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.http(headers={"Transfer-Encoding": "chunked"})[0], 400)
         self.assertEqual(self.http(body=b'{"x":1,"x":2}')[0], 400)
         self.assertEqual(self.http(body=b'{"x":NaN}')[0], 400)
+        self.assertEqual(self.http(body=b'{"x":1e999}')[0], 400)
+        self.assertEqual(self.http(body=b'{"x":"\\ud800"}')[0], 400)
+        self.assertEqual(self.http(body=b'{"\\udfff":0}')[0], 400)
         self.assertEqual(self.http(body=b'{')[0], 400)
 
     def test_duplicate_security_headers_rejected(self):
@@ -281,6 +303,24 @@ class NativeTransportTests(unittest.TestCase):
                 second = broker.call("get_change_status", {"nonce": "x"})
                 self.assertEqual(first["pid"], second["pid"])
                 self.assertEqual(second["op"], "get_change_status")
+            finally:
+                broker.close()
+
+    def test_presubmission_validation_preserves_healthy_resident_channel(self):
+        with tempfile.TemporaryDirectory() as root:
+            helper = self.helper(root, 'import sys,json,os\ncount=0\nfor line in sys.stdin:\n count+=1; print(json.dumps({"result":{"pid":os.getpid(),"count":count}}),flush=True)\n')
+            broker = NativeBroker(helper, root, timeout=2)
+            try:
+                first = broker.call("list_calendars", {})
+                for invalid in ({"text": "\ud800"}, {"\udfff": "key"}, {"nested": [float("inf")]},
+                                {"nested": [float("nan")]}, {"unsupported": object()}, {1: "key"}):
+                    with self.subTest(invalid=repr(invalid)), self.assertRaises(NativeError) as raised:
+                        broker.call("commit_create", invalid)
+                    self.assertEqual(raised.exception.code, "invalid_arguments")
+                    self.assertFalse(broker.failed)
+                    self.assertIsNone(broker.process.poll())
+                second = broker.call("list_calendars", {})
+                self.assertEqual(second, {"pid": first["pid"], "count": 2})
             finally:
                 broker.close()
 

@@ -26,6 +26,57 @@ HELPER = Path(os.environ.get("CALENDAR_MCP_TEST_HELPER", str(DEFAULT_HELPER)))
 
 @unittest.skipUnless(HELPER.is_file(), "Build native helper with swift build before end-to-end synthetic validation")
 class NativeIntegrationTests(unittest.TestCase):
+    def test_invalid_json_keeps_synthetic_native_http_stdio_channel_healthy(self):
+        with tempfile.TemporaryDirectory(prefix="calendar synthetic invalid json ") as directory:
+            state = initialize(Path(directory) / "gateway")
+            token = read_token(state)
+            native = private_directory(state / "native-synthetic")
+            broker = NativeBroker(HELPER, native, "synthetic", credential_binding=hashlib.sha256(token.encode()).hexdigest())
+            server = GatewayServer(0, token, Protocol(broker))
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+            thread.start()
+            adapter = None
+            try:
+                client = GatewayClient(state, server.server_port)
+                original_pid = broker.process.pid
+                good = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list_calendars"}}).encode()
+                bad = [b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_event","arguments":{"event_id":"\\ud800"}}}',
+                       b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_event","arguments":{"\\udfff":0}}}',
+                       b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_event","arguments":{"event_id":{"nested":[1e999]}}}}']
+                for wire in bad:
+                    with self.assertRaises(ValueError):
+                        client.send(wire)
+                    self.assertFalse(client.send(good)["result"]["isError"])
+                    self.assertFalse(broker.failed)
+                    self.assertEqual(broker.process.pid, original_pid)
+                adapter = subprocess.Popen([sys.executable, "-m", "calendar_mcp", "stdio", "--state-dir", str(state), "--port", str(server.server_port)],
+                                           cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+                for wire in bad:
+                    adapter.stdin.write(wire + b"\n")
+                    adapter.stdin.flush()
+                    self.assertTrue(select.select([adapter.stdout], [], [], 5)[0], "stdio rejection timed out")
+                    self.assertEqual(json.loads(adapter.stdout.readline())["error"]["code"], -32700)
+                    adapter.stdin.write(good + b"\n")
+                    adapter.stdin.flush()
+                    self.assertTrue(select.select([adapter.stdout], [], [], 5)[0], "stdio recovery timed out")
+                    self.assertFalse(json.loads(adapter.stdout.readline())["result"]["isError"])
+                self.assertFalse(broker.failed)
+                self.assertEqual(broker.process.pid, original_pid)
+                adapter.stdin.close()
+                self.assertEqual(adapter.wait(timeout=3), 0)
+                self.assertEqual(adapter.stderr.read(), b"")
+            finally:
+                if adapter is not None:
+                    if adapter.poll() is None:
+                        adapter.terminate()
+                        adapter.wait(timeout=3)
+                    for pipe in (adapter.stdin, adapter.stdout, adapter.stderr):
+                        pipe.close()
+                server.shutdown()
+                server.server_close()
+                thread.join()
+                broker.close()
+
     def test_native_http_retained_history_pagination_and_signed_recovery(self):
         with tempfile.TemporaryDirectory(prefix="calendar synthetic recovery ") as directory:
             state = initialize(Path(directory) / "gateway")

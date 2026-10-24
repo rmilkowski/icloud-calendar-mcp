@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .json_values import validate_json
+
 
 def obj(properties, required=()):
     return {"type": "object", "properties": properties, "required": list(required),
@@ -198,6 +200,11 @@ class ValidationError(ValueError):
 
 
 def validate(value, schema, path="arguments", depth=0):
+    if depth == 0:
+        try:
+            validate_json(value)
+        except (ValueError, RecursionError) as exc:
+            raise ValidationError(str(exc)) from None
     if depth > 20:
         raise ValidationError("JSON nesting exceeds limit")
     if "oneOf" in schema:

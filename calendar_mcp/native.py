@@ -9,6 +9,7 @@ import threading
 import time
 
 from .launch_services import LaunchServicesProcess
+from .json_values import validate_json
 
 MAX_NATIVE = 4 * 1024 * 1024
 RECOVERY_CAPABILITIES = {"version": 1, "storage_version": 2, "recovery": True,
@@ -142,13 +143,19 @@ class NativeBroker:
                 raise OSError("Native process exited")
 
     def call(self, name, arguments):
+        # Validation/encoding cannot have submitted any bytes. Keep this outside
+        # the channel-failure handler so a bad request cannot poison the broker.
+        try:
+            validate_json({"op": name, "arguments": arguments}, max_depth=22)
+            wire = json.dumps({"op": name, "arguments": arguments}, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8") + b"\n"
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            raise NativeError("invalid_arguments", "Invalid native request; no request submitted") from None
         if not self.lock.acquire(timeout=1):
             raise NativeError("broker_busy", "Native broker busy; no request submitted")
         submitted = False
         try:
             if self.failed or self.process.poll() is not None:
                 raise NativeError("broker_unavailable", "Native broker unavailable; restart the gateway and check get_change_status before another write")
-            wire = json.dumps({"op": name, "arguments": arguments}, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8") + b"\n"
             deadline = time.monotonic() + self.timeout
             view = memoryview(wire)
             submitted = True
