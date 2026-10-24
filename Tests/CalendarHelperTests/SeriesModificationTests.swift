@@ -12,6 +12,8 @@ private final class SeriesProbeBackend: CalendarBackend {
     func query(start: Date, end: Date, calendarIDs: [String]) throws -> [EventRecord] { try base.query(start: start, end: end, calendarIDs: calendarIDs) }
     func get(nativeID: String, calendarID: String, occurrence: String?, knownStart: Date) throws -> EventRecord { try base.get(nativeID: nativeID, calendarID: calendarID, occurrence: occurrence, knownStart: knownStart) }
     func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord? { try base.apply(action: action, calendarID: calendarID, existing: existing, fields: fields) }
+    func applyRestoringAlarms(calendarID: String, existing: EventRecord, fields: EventFields, alarms: JSON) throws -> EventRecord? { try base.applyRestoringAlarms(calendarID: calendarID, existing: existing, fields: fields, alarms: alarms) }
+    func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord { try base.restore(calendarID: calendarID, fields: fields, details: details, availability: availability) }
     func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord {
         if missingAnchor { throw CoreError("event_missing", "Synthetic missing first anchor") }
         return try base.firstSeriesOccurrence(for: selected)
@@ -185,7 +187,7 @@ final class SeriesModificationTests: XCTestCase {
         XCTAssertEqual(call(broker, "get_event", ["event_id": views[0]["id"]])["result"]["event"], result["result"]["event"])
     }
 
-    func testConservativeLaterCalendarAndOccurrenceCrossingGuardsSurviveDetailExpiry() throws {
+    func testIndependentLaterGroupAllowsInverseWhileSameGroupCrossingSurvivesDetailExpiry() throws {
         let state = try store(), base = try fixture(), broker = Broker(state: state, backend: base), views = events(broker)
         let ordinary = call(broker, "preflight_change", ["action": .string("modify"), "scope": .string("this"), "event_id": views[1]["id"], "fields": .object(["notes": .string("Occurrence notes")])])["result"]["preview"]
         let ordinaryResult = call(broker, "commit_modify", ["preview": ordinary])
@@ -196,8 +198,8 @@ final class SeriesModificationTests: XCTestCase {
         let inverse = plan["result"]["steps"].array![0]["preview"]
         let later = call(broker, "preflight_change", ["action": .string("modify"), "scope": .string("this"), "event_id": views[3]["id"], "fields": .object(["notes": .string("Another pattern in same calendar")])])["result"]["preview"]
         XCTAssertEqual(call(broker, "commit_modify", ["preview": later])["result"]["state"], .string("applied"))
-        XCTAssertEqual(rollback(broker, result["result"]["nonce"])["error"]["code"], .string("rollback_series_boundary"))
-        XCTAssertEqual(commit(broker, inverse, rollback: true)["error"]["code"], .string("rollback_series_boundary"))
+        XCTAssertEqual(rollback(broker, result["result"]["nonce"])["result"]["step_count"], .int(1))
+        XCTAssertEqual(commit(broker, inverse, rollback: true)["result"]["state"], .string("applied"))
         let nonce = result["result"]["nonce"].string!
         // Expired series evidence leaves its structural crossing marker intact.
         try state.execute("DELETE FROM execution_keys WHERE nonce=?", [nonce]); try state.execute("UPDATE execution_details SET expired=1 WHERE nonce=?", [nonce])
@@ -209,6 +211,59 @@ final class SeriesModificationTests: XCTestCase {
         let first = commit(broker, draft(broker, id: views[0]["id"], fields: ["title": .string("First series")])["result"]["preview"])
         let second = commit(broker, draft(broker, id: views[3]["id"], fields: ["title": .string("Second series")])["result"]["preview"])
         XCTAssertEqual(call(broker, "preflight_rollback", ["change_ids": .array([first["result"]["nonce"], second["result"]["nonce"]])])["error"]["code"], .string("invalid_selection"))
+    }
+
+    func testUnknownIndependentSeriesAllowsSameCalendarSeriesInverseAndKeepsUnknownReplay() throws {
+        let state = try store(), base = try fixture(), probe = SeriesProbeBackend(base), broker = Broker(state: state, backend: probe), views = events(broker)
+        let source = commit(broker, draft(broker, id: views[1]["id"], fields: ["title": .string("Recover this pattern")])["result"]["preview"])
+        let unknownPreview = draft(broker, id: views[3]["id"], fields: ["title": .string("Unknown separate pattern")])["result"]["preview"]
+        probe.throwBeforeWrite = true
+        let unknown = commit(broker, unknownPreview)
+        XCTAssertEqual(unknown["result"]["state"], .string("unknown"))
+        probe.throwBeforeWrite = false
+        let plan = rollback(broker, source["result"]["nonce"])
+        XCTAssertEqual(plan["result"]["step_count"], .int(1))
+        let inverse = try XCTUnwrap(plan["result"]["steps"].array?.first?["preview"])
+        XCTAssertEqual(commit(broker, inverse, rollback: true)["result"]["state"], .string("applied"))
+        XCTAssertEqual(commit(broker, unknownPreview), unknown)
+        XCTAssertTrue(try state.hasUnresolved()); XCTAssertEqual(base.writeCount, 2)
+        XCTAssertEqual(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0], "3")
+    }
+
+    func testUnknownOccurrenceAllowsIndependentSignedSeriesButBlocksSameGroupWithoutChangingUnknownEvidence() throws {
+        let state = try store(), base = try fixture(), broker = Broker(state: state, backend: base), views = events(broker)
+        let ordinary = call(broker, "preflight_change", ["action": .string("modify"), "scope": .string("this"), "event_id": views[1]["id"], "fields": .object(["notes": .string("Unknown occurrence notes")])])["result"]["preview"]
+        base.throwAfterWrite = true
+        let unknown = call(broker, "commit_modify", ["preview": ordinary]), nonce = try XCTUnwrap(unknown["result"]["nonce"].string)
+        XCTAssertEqual(unknown["result"]["state"], .string("unknown")); base.throwAfterWrite = false
+        let journal = try state.rows("SELECT * FROM executions WHERE nonce=?", [nonce])
+        let detail = try state.rows("SELECT * FROM execution_details WHERE nonce=?", [nonce])
+        let key = try state.rows("SELECT * FROM execution_keys WHERE nonce=?", [nonce])
+        let quota = try state.rows("SELECT * FROM write_safety_claims WHERE nonce=?", [nonce])
+        let same = draft(broker, id: views[0]["id"], fields: ["title": .string("Blocked same group")])["result"]["preview"]
+        XCTAssertEqual(commit(broker, same)["error"]["code"], .string("unresolved_write"))
+        let independent = draft(broker, id: views[3]["id"], fields: ["title": .string("Independent pattern succeeds")])["result"]["preview"]
+        XCTAssertEqual(commit(broker, independent)["result"]["state"], .string("applied"))
+        XCTAssertEqual(call(broker, "commit_modify", ["preview": ordinary]), unknown)
+        XCTAssertEqual(try state.rows("SELECT * FROM executions WHERE nonce=?", [nonce]), journal)
+        XCTAssertEqual(try state.rows("SELECT * FROM execution_details WHERE nonce=?", [nonce]), detail)
+        XCTAssertEqual(try state.rows("SELECT * FROM execution_keys WHERE nonce=?", [nonce]), key)
+        XCTAssertEqual(try state.rows("SELECT * FROM write_safety_claims WHERE nonce=?", [nonce]), quota)
+        XCTAssertEqual(base.writeCount, 2); XCTAssertTrue(try state.hasUnresolved())
+    }
+
+    func testUnknownIndependentSeriesDoesNotBlockOccurrenceInverseInSameCalendar() throws {
+        let state = try store(), base = try fixture(), probe = SeriesProbeBackend(base), broker = Broker(state: state, backend: probe), views = events(broker)
+        let ordinary = call(broker, "preflight_change", ["action": .string("modify"), "scope": .string("this"), "event_id": views[1]["id"], "fields": .object(["notes": .string("Recover occurrence notes")])])["result"]["preview"]
+        let source = call(broker, "commit_modify", ["preview": ordinary])
+        probe.throwBeforeWrite = true
+        let unknown = commit(broker, draft(broker, id: views[3]["id"], fields: ["title": .string("Independent unknown")])["result"]["preview"])
+        XCTAssertEqual(unknown["result"]["state"], .string("unknown")); probe.throwBeforeWrite = false
+        let plan = rollback(broker, source["result"]["nonce"])
+        XCTAssertEqual(plan["result"]["step_count"], .int(1))
+        let inverse = try XCTUnwrap(plan["result"]["steps"].array?.first?["preview"])
+        XCTAssertEqual(call(broker, "commit_rollback", ["preview": inverse])["result"]["state"], .string("applied"))
+        XCTAssertTrue(try state.hasUnresolved()); XCTAssertEqual(base.writeCount, 2)
     }
 
     func testSeriesQuotaRecheckAndLocalReviewedInverseUseExistingNativePolicies() throws {

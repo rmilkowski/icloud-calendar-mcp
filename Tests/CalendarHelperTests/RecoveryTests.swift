@@ -176,7 +176,7 @@ final class RecoveryTests: XCTestCase {
         XCTAssertNotEqual(call(broker, "get_stored_change", ["change_id": original["result"]["nonce"]])["result"]["before"], .null)
         let listed = call(broker, "list_changes")["result"]["changes"].array!
         XCTAssertEqual(listed.count, 1); XCTAssertEqual(listed[0]["retention_hold"], .bool(true))
-        XCTAssertEqual(plan(broker, [original["result"]["nonce"]])["error"]["code"], .string("unresolved_write")); XCTAssertEqual(backend.writeCount, 2)
+        XCTAssertEqual(plan(broker, [original["result"]["nonce"]])["error"]["code"], .string("rollback_ineligible")); XCTAssertEqual(backend.writeCount, 2)
     }
 
     func testLocalReviewAuditSourceCannotBeChosenThroughNDJSON() throws {

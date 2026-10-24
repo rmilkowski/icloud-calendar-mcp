@@ -113,7 +113,7 @@ final class CommitObservationTests: XCTestCase {
             let state = try store(dir)
             for status in ["applied", "unknown"] {
                 let nonce = UUID().uuidString
-                _ = try state.claim(nonce: nonce, payload: .object(["action": .string("modify"), "before": .object(["id": .string("synthetic-event")]), "after": .object(["notes": .string("Synthetic retained evidence")])]), now: Date())
+                _ = try state.claim(nonce: nonce, payload: .object(["action": .string("modify"), "before": .object(["id": .string("11111111-1111-4111-8111-111111111111")]), "after": .object(["notes": .string("Synthetic retained evidence")])]), now: Date())
                 try state.finish(nonce: nonce, state: status, result: .object(["nonce": .string(nonce), "state": .string(status)]), event: status == "unknown" ? "write_unknown" : "write_applied")
                 _ = try state.append(event: "commit_replayed", nonce: nonce, payload: .object(["state": .string(status)]))
                 if status == "unknown" { unknown = nonce }

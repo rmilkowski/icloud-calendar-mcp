@@ -215,7 +215,7 @@ public final class Broker: @unchecked Sendable {
         }
         let issued = try parseDate(e.string("issued_at")), expiry = try parseDate(e.string("expires_at")), current = now()
         guard issued <= current.addingTimeInterval(30), expiry > current, expiry > issued, expiry.timeIntervalSince(issued) <= 600.001 else { throw CoreError("preview_expired", "Preview expired or invalid; request a new preflight") }
-        guard try !state.hasUnresolved() else { throw CoreError("unresolved_write", "An earlier write is unresolved; inspect and reconcile before any new write") }
+        try state.assertNoUnresolvedConflict(payload: envelope)
         if rollback { try validateRollback(envelope) }
         let calendarID = try Arguments(envelope["calendar"], allowed: ["id", "title", "source", "writable", "subscribed"], required: ["id", "title", "source", "writable", "subscribed"]).string("id")
         guard let pair = try calendars().first(where: { $0.1["id"].string == calendarID }), pair.1 == envelope["calendar"] else { throw CoreError("stale_calendar", "Calendar changed; request a new preflight") }
@@ -284,11 +284,11 @@ public final class Broker: @unchecked Sendable {
                 } else { result = .object(["nonce": .string(nonce), "state": .string("applied"), "action": .string(action), "event": try view(refreshed), "audit_sequence": .int(auditSequence)]) }
             }
         } catch {
-            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string(action), "audit_sequence": .int(auditSequence), "message": .string("Write may have happened; do not retry or create another change until reconciled")])
+            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string(action), "audit_sequence": .int(auditSequence), "message": .string("Write may have happened; do not retry. Inspect the original nonce and reconcile before related changes")])
             try? state.finish(nonce: nonce, state: "unknown", result: unknown, event: "write_unknown")
             return unknown
         }
         do { try state.finish(nonce: nonce, state: "applied", result: result, event: "write_applied"); return result }
-        catch { return .object(["nonce": .string(nonce), "state": .string("unknown"), "message": .string("EventKit returned but durable outcome recording failed; inspect status before any further write")]) }
+        catch { return .object(["nonce": .string(nonce), "state": .string("unknown"), "message": .string("EventKit returned but durable outcome recording failed; do not retry. Inspect the original nonce before related writes")]) }
     }
 }

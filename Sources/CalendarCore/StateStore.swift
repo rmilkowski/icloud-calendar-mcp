@@ -222,7 +222,8 @@ public final class StateStore {
     public func claim(nonce: String, payload: JSON, now: Date) throws -> Int {
         let result: (sequence: Int?, rejection: CoreError?) = try transaction {
             guard try execution(nonce) == nil else { throw CoreError("nonce_replayed", "Nonce already claimed") }
-            guard try !hasUnresolved() else { throw CoreError("unresolved_write", "An earlier write outcome is unresolved; inspect status and reconcile locally") }
+            try assertNoUnresolvedConflict(payload: payload)
+            let marker = try conflictMarker(payload: payload, nonce: nonce)
             guard let action = payload["action"].string, ["create", "modify", "delete"].contains(action) else { throw CoreError("invalid_preview", "Invalid execution action") }
             if action != "create" {
                 let policy = try adoptWriteSafetyPolicy()
@@ -236,7 +237,7 @@ public final class StateStore {
                 _ = try appendInsideTransaction(event: "write_safety_charged", nonce: nonce, payload: accounting)
             }
             let result: JSON = .object(["nonce": .string(nonce), "state": .string("intent_recorded")])
-            try storeIntent(nonce: nonce, payload: payload, result: result, now: now)
+            try storeIntent(nonce: nonce, payload: payload, result: result, now: now, marker: marker)
             return (try appendInsideTransaction(event: "write_intent", nonce: nonce, payload: payload), nil)
         }
         if let rejection = result.rejection { throw rejection }; return result.sequence!

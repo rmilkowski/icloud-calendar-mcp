@@ -98,7 +98,7 @@ extension Broker {
         }
         let current = now(), issued = try parseDate(e.string("issued_at")), expiry = try parseDate(e.string("expires_at"))
         guard issued <= current.addingTimeInterval(30), expiry > current, expiry > issued, expiry.timeIntervalSince(issued) <= 600.001 else { throw CoreError("preview_expired", "Series preview expired; request a new preflight") }
-        guard try !state.hasUnresolved() else { throw CoreError("unresolved_write", "Resolve earlier unknown outcomes before any fresh write") }
+        try state.assertNoUnresolvedConflict(payload: envelope)
         if rollback { try validateSeriesRollback(envelope) }
         guard let selectedID = envelope["series"]["selected"]["id"].string else { throw CoreError("invalid_preview", "Missing selected series reference") }
         let selected = try event(selectedID), selectedView = try view(selected)
@@ -124,7 +124,7 @@ extension Broker {
             if rollback { response["rollback_of"] = envelope["rollback"]["source_change_ids"]; response["event_id"] = before["id"] }
             result = .object(response)
         } catch {
-            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string("modify"), "audit_sequence": .int(sequence), "message": .string("Series write may have happened; do not retry or create another change until reconciled")])
+            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string("modify"), "audit_sequence": .int(sequence), "message": .string("Series write may have happened; do not retry. Inspect the original nonce and reconcile before related changes")])
             try? state.finish(nonce: nonce, state: "unknown", result: unknown, event: "write_unknown"); return unknown
         }
         do { try state.finish(nonce: nonce, state: "applied", result: result, event: "write_applied"); return result }

@@ -13,20 +13,17 @@ extension Broker {
         return marker["series_anchor_id"].string != nil || (marker["scope"] == .string("series") && marker["action"] == .string("modify"))
     }
     func rejectSeriesCrossing(_ sources: [[String]]) throws {
-        guard let earliest = sources.compactMap({ Int($0[7]) }).min(), let first = sources.first else { throw CoreError("invalid_selection", "Missing rollback history") }
-        let calendar = try executionCalendar(first)
+        guard let earliest = sources.compactMap({ Int($0[7]) }).min(), !sources.isEmpty else { throw CoreError("invalid_selection", "Missing rollback history") }
         for row in try state.recoveryRows() where (Int(row[7]) ?? 0) > earliest {
             if try isSeriesExecution(row) {
-                let other = try executionCalendar(row)
-                guard calendar != nil, other != nil, calendar != other else { throw CoreError("rollback_series_boundary", "Occurrence recovery cannot cross a later series default-field intent in this calendar") }
+                guard try sources.allSatisfy({ try state.executionsProvenDisjoint($0, from: row) }) else { throw CoreError("rollback_series_boundary", "Occurrence recovery cannot cross a possibly related later series default-field intent") }
             }
         }
     }
     func rejectLaterCalendarIntent(after source: [String], calendar: String) throws {
         guard let rowID = Int(source[7]) else { throw CoreError("state_corrupt", "Invalid execution order") }
         for row in try state.recoveryRows() where (Int(row[7]) ?? 0) > rowID {
-            let other = try executionCalendar(row)
-            guard other != nil, other != calendar else { throw CoreError("rollback_series_boundary", "Later execution history in this calendar prevents series default-field recovery") }
+            guard try state.executionsProvenDisjoint(source, from: row) else { throw CoreError("rollback_series_boundary", "Possibly related later execution history prevents series default-field recovery") }
         }
     }
     func seriesRollbackStep(_ sources: [[String]], selectionID: String) throws -> JSON {

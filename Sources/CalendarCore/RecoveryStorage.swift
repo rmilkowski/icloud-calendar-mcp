@@ -61,13 +61,13 @@ extension StateStore {
         for key in ["action", "audit_sequence", "outcome", "rollback_of", "event_id", "parent_nonce", "completed", "remaining", "stopped_reason"] where result[key] != .null { value[key] = result[key] }
         return .object(value)
     }
-    func storeIntent(nonce: String, payload: JSON, result: JSON, now: Date) throws {
+    func storeIntent(nonce: String, payload: JSON, result: JSON, now: Date, marker: JSON) throws {
         let days = try recoveryPolicy()["retention_days"].integer!
         let captured = max(now, try metadata("recovery_clock_highwater").map(parseDate) ?? now)
         let key = SymmetricKey(size: .bits256), expiry = captured.addingTimeInterval(Double(days) * 86400)
         try execute("INSERT INTO execution_keys(nonce,key) VALUES(?,?)", [nonce, key.withUnsafeBytes { Data($0).base64EncodedString() }])
         try execute("INSERT INTO execution_details(nonce,payload_cipher,result_cipher,captured,expires,expired) VALUES(?,?,?,?,?,0)", [nonce, try encrypted(payload, key: key, nonce: nonce, field: "payload_cipher"), try encrypted(result, key: key, nonce: nonce, field: "result_cipher"), iso(captured), iso(expiry)])
-        try execute("INSERT INTO executions(nonce,payload,state,result,created) VALUES(?,?,'intent_recorded',?,?)", [nonce, try payloadMarker(payload).text(), try minimalResult(nonce: nonce, state: "intent_recorded", result: result).text(), iso(now)])
+        try execute("INSERT INTO executions(nonce,payload,state,result,created) VALUES(?,?,'intent_recorded',?,?)", [nonce, try marker.text(), try minimalResult(nonce: nonce, state: "intent_recorded", result: result).text(), iso(now)])
     }
     func storeResult(nonce: String, state: String, result: JSON) throws {
         guard let row = try rows("SELECT key FROM execution_keys WHERE nonce=?", [nonce]).first,
