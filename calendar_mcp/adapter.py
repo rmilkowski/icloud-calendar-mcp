@@ -5,6 +5,7 @@ import json
 import sys
 
 from .protocol import VERSIONS, error, loads
+from .json_values import validate_json
 from .security import read_token
 from .server import MAX_BODY, MAX_RESPONSE
 
@@ -67,19 +68,34 @@ def run_stdio(client, source=None, sink=None):
             sink.flush()
             return 1
         identifier = None
+        submitted = False
         try:
             request = loads(wire)
             if isinstance(request, dict):
-                identifier = request.get("id")
+                candidate = request.get("id")
+                if "id" in request and (isinstance(candidate, bool) or not isinstance(candidate, (str, int))):
+                    result = error(None, -32600, "Invalid JSON-RPC request identifier")
+                    sink.write(json.dumps(result).encode() + b"\n")
+                    sink.flush()
+                    continue
+                identifier = candidate
                 if request.get("method") == "initialize":
-                    requested = request.get("params", {}).get("protocolVersion")
+                    params = request.get("params", {})
+                    requested = params.get("protocolVersion") if isinstance(params, dict) else None
                     if requested in VERSIONS:
                         version = requested
+            submitted = True
             result = client.send(wire, version)
         except (ValueError, UnicodeError, RecursionError, TypeError, AttributeError):
-            result = error(identifier, -32700, "Invalid request or gateway response")
+            result = (error(identifier, -32603, "Invalid gateway response; no retry. If a write was submitted, query get_change_status by nonce after reconnecting")
+                      if submitted else error(identifier, -32700, "Invalid request"))
         except (OSError, http.client.HTTPException):
             result = error(identifier, -32603, "Gateway transport failed; no retry. If a write was submitted, query get_change_status by nonce after reconnecting")
         if result is not None:
-            sink.write(json.dumps(result, ensure_ascii=True, allow_nan=False).encode() + b"\n")
+            try:
+                validate_json(result, max_depth=32)
+                response = json.dumps(result, ensure_ascii=True, allow_nan=False).encode() + b"\n"
+            except (ValueError, UnicodeError, RecursionError, TypeError, OverflowError):
+                response = json.dumps(error(identifier, -32603, "Invalid gateway response; no retry. If a write was submitted, query get_change_status by nonce after reconnecting")).encode() + b"\n"
+            sink.write(response)
             sink.flush()

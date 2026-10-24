@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from calendar_mcp.adapter import GatewayClient, run_stdio
 from calendar_mcp.native import ALERTS_CAPABILITIES, NativeBroker, NativeError, RECOVERY_CAPABILITIES
@@ -284,6 +285,102 @@ class HTTPTests(unittest.TestCase):
         sink = io.BytesIO()
         self.assertEqual(run_stdio(GatewayClient(self.state, self.port), io.BytesIO(b"x" * (MAX_BODY + 1)), sink), 1)
         self.assertEqual(self.broker.calls, [])
+
+
+class AdapterTests(unittest.TestCase):
+    def test_gateway_response_decode_failure_has_uncertain_outcome_guidance(self):
+        class Response:
+            status = 200
+
+            def __init__(self, body):
+                self.body = body
+
+            def read(self, limit):
+                return self.body
+
+        class Connection:
+            def __init__(self, response):
+                self.response = response
+
+            def request(self, *args, **kwargs):
+                pass
+
+            def getresponse(self):
+                return self.response
+
+            def close(self):
+                pass
+
+        for bad in (b'{"result":1e999}', b'{"result":"\\ud800"}', b'{'):
+            with self.subTest(response=bad):
+                client = GatewayClient.__new__(GatewayClient)
+                client.token, client.port = "synthetic-fixture-token", 8765
+                responses = [Connection(Response(bad)), Connection(Response(b'{"jsonrpc":"2.0","id":2,"result":{}}'))]
+                sink = io.BytesIO()
+                source = io.BytesIO(b"".join(json.dumps(request("ping", identifier=index)).encode() + b"\n" for index in (1, 2)))
+                with patch("calendar_mcp.adapter.http.client.HTTPConnection", side_effect=responses) as connections:
+                    self.assertEqual(run_stdio(client, source, sink), 0)
+                first, second = [loads(line) for line in sink.getvalue().splitlines()]
+                self.assertEqual(first["id"], 1)
+                self.assertEqual(first["error"]["code"], -32603)
+                self.assertIn("no retry", first["error"]["message"])
+                self.assertIn("get_change_status", first["error"]["message"])
+                self.assertEqual(second, {"jsonrpc": "2.0", "id": 2, "result": {}})
+                self.assertEqual(connections.call_count, 2)
+
+    def test_invalid_ids_and_malformed_initialize_preserve_next_frame(self):
+        class Client:
+            def __init__(self):
+                self.calls = []
+                self.protocol = Protocol(FakeBroker())
+
+            def send(self, wire, version):
+                self.calls.append((loads(wire), version))
+                return self.protocol.handle(loads(wire))
+
+        client = Client()
+        frames = []
+        expected = []
+        for index, identifier in enumerate((None, True, False, 1.5, [], {})):
+            frames.extend((request("initialize", {"protocolVersion": VERSIONS[0]}, identifier), request("ping", identifier=index)))
+            expected.extend(((None, -32600), (index, None)))
+        for index, params in enumerate((None, [], 7, "invalid", True), start=20):
+            frames.extend(({"jsonrpc": "2.0", "id": index, "method": "initialize", "params": params}, request("ping", identifier=str(index))))
+            expected.extend(((index, -32602), (str(index), None)))
+        # Exponent overflow fails decoding, so its identifier is never reflected.
+        raw = b'{"jsonrpc":"2.0","id":1e999,"method":"initialize","params":null}\n'
+        frames.append(request("ping", identifier=-1))
+        expected.extend(((None, -32700), (-1, None)))
+        source = io.BytesIO(b"".join(json.dumps(frame).encode() + b"\n" for frame in frames[:-1]) + raw + json.dumps(frames[-1]).encode() + b"\n")
+        sink = io.BytesIO()
+        self.assertEqual(run_stdio(client, source, sink), 0)
+        replies = [loads(line) for line in sink.getvalue().splitlines()]
+        self.assertEqual([(reply["id"], reply.get("error", {}).get("code")) for reply in replies], expected)
+        self.assertEqual(len(client.calls), 17)
+        self.assertTrue(all(version == VERSIONS[-1] for _, version in client.calls))
+
+    def test_invalid_gateway_result_serialization_is_contained_without_retry(self):
+        for invalid in ({"number": float("inf")}, {"text": "\ud800"}, {"unsupported": object()}, {1: "key"}):
+            with self.subTest(invalid=repr(invalid)):
+                class Client:
+                    def __init__(self):
+                        self.calls = 0
+
+                    def send(self, wire, version):
+                        self.calls += 1
+                        return invalid if self.calls == 1 else {"jsonrpc": "2.0", "id": 2, "result": {}}
+
+                client = Client()
+                sink = io.BytesIO()
+                source = io.BytesIO(b"".join(json.dumps(request("ping", identifier=index)).encode() + b"\n" for index in (1, 2)))
+                self.assertEqual(run_stdio(client, source, sink), 0)
+                first, second = [loads(line) for line in sink.getvalue().splitlines()]
+                self.assertEqual(first["id"], 1)
+                self.assertEqual(first["error"]["code"], -32603)
+                self.assertIn("no retry", first["error"]["message"])
+                self.assertIn("get_change_status", first["error"]["message"])
+                self.assertEqual(second, {"jsonrpc": "2.0", "id": 2, "result": {}})
+                self.assertEqual(client.calls, 2)
 
 
 class NativeTransportTests(unittest.TestCase):

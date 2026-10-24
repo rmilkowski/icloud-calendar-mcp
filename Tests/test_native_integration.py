@@ -60,6 +60,20 @@ class NativeIntegrationTests(unittest.TestCase):
                     adapter.stdin.flush()
                     self.assertTrue(select.select([adapter.stdout], [], [], 5)[0], "stdio recovery timed out")
                     self.assertFalse(json.loads(adapter.stdout.readline())["result"]["isError"])
+                malformed = [(b'{"jsonrpc":"2.0","id":1.5,"method":"initialize","params":null}', None, -32600),
+                             (b'{"jsonrpc":"2.0","id":{},"method":"initialize","params":[]}', None, -32600),
+                             (b'{"jsonrpc":"2.0","id":3,"method":"initialize","params":null}', 3, -32602)]
+                for wire, identifier, code in malformed:
+                    adapter.stdin.write(wire + b"\n")
+                    adapter.stdin.flush()
+                    self.assertTrue(select.select([adapter.stdout], [], [], 5)[0], "stdio malformed request timed out")
+                    response = json.loads(adapter.stdout.readline())
+                    self.assertEqual(response["id"], identifier)
+                    self.assertEqual(response["error"]["code"], code)
+                    adapter.stdin.write(good + b"\n")
+                    adapter.stdin.flush()
+                    self.assertTrue(select.select([adapter.stdout], [], [], 5)[0], "stdio continuation timed out")
+                    self.assertFalse(json.loads(adapter.stdout.readline())["result"]["isError"])
                 self.assertFalse(broker.failed)
                 self.assertEqual(broker.process.pid, original_pid)
                 adapter.stdin.close()
