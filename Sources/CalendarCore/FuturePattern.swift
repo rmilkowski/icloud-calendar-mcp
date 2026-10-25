@@ -45,6 +45,16 @@ public enum FuturePattern {
         try validateRule(selected.details["recurrence_rules"], boundary: date)
         return date
     }
+    /// Internal prefix verification uses the retained nominal master, which can
+    /// remain provider-visible even when its expanded first occurrence is excluded.
+    public static func prefixMaster(_ current: EventRecord, retained: EventRecord) throws -> EventRecord {
+        guard let occurrence = retained.occurrence, current.nativeID == retained.nativeID,
+              current.calendarNativeID == retained.calendarNativeID, current.occurrence == occurrence,
+              current.recurring, !current.detached, current.fields.start == occurrence else {
+            throw CoreError("stale_event", "The retained prefix master no longer resolves exactly")
+        }
+        return current
+    }
     public static func validPrefixRule(_ raw: JSON, original: JSON, anchor: Date, boundary: Date) throws -> Bool {
         guard let rules = raw.array, rules.count == 1, var prefix = rules[0].object,
               let originals = original.array, originals.count == 1, var prior = originals[0].object,

@@ -24,7 +24,14 @@ private final class TerminationProbe: CalendarBackend {
         if occurrence == "2026-10-04T09:00:00.000Z" { prefixReads += 1; if prefixReads == mutatePrefixOnRead, let index = base.events.firstIndex(where: { $0.occurrence == occurrence && $0.nativeID == nativeID }) { base.events[index].fields.notes = "External prefix replacement" } }
         let result = try base.get(nativeID: nativeID, calendarID: calendarID, occurrence: occurrence, knownStart: knownStart); afterGet?(); return result
     }
-    func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord { reads += 1; if denyReads { throw CoreError("synthetic_denied", "Provider reads disabled") }; let record = try base.firstSeriesOccurrence(for: selected); afterAnchor?(); return record }
+    func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord {
+        reads += 1; if denyReads { throw CoreError("synthetic_denied", "Provider reads disabled") }
+        if selected.occurrence == "2026-10-04T09:00:00.000Z" {
+            prefixReads += 1
+            if prefixReads == mutatePrefixOnRead, let index = base.events.firstIndex(where: { $0.occurrence == selected.occurrence && $0.nativeID == selected.nativeID }) { base.events[index].fields.notes = "External prefix replacement" }
+        }
+        let record = try base.firstSeriesOccurrence(for: selected); afterAnchor?(); return record
+    }
     func apply(action: String, calendarID: String, existing: EventRecord?, fields: EventFields?) throws -> EventRecord? { try base.apply(action: action, calendarID: calendarID, existing: existing, fields: fields) }
     func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult { try base.applyFutureFields(selected: selected, originalAnchor: originalAnchor, fields: fields, changedFields: changedFields, restoredAlarms: restoredAlarms, boundaryNow: boundaryNow) }
     func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord { try base.applySeriesFields(anchor: anchor, fields: fields, changedFields: changedFields, restoredAlarms: restoredAlarms) }
@@ -257,7 +264,7 @@ final class FutureTerminationTests: XCTestCase {
             let broker = Broker(state: state, backend: probe, now: { current }), preview = draft(broker, views(broker)[0]["id"])["result"]["preview"]
             if restore {
                 let deleted = commit(broker, preview), recovery = try XCTUnwrap(rollback(broker, deleted["result"]["nonce"])["result"]["steps"].array?.first?["preview"])
-                probe.afterGet = { current = self.initialNow.addingTimeInterval(601) }
+                probe.afterAnchor = { current = self.initialNow.addingTimeInterval(601) }
                 XCTAssertEqual(commit(broker, recovery, restore: true)["error"]["code"], .string("preview_expired"))
             } else {
                 probe.afterAnchor = { current = self.initialNow.addingTimeInterval(601) }

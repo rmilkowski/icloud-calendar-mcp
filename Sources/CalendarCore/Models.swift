@@ -266,7 +266,7 @@ public final class SyntheticBackend: CalendarBackend {
             }
         }
         if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-remove failure") }
-        let past = originalAnchor.occurrence == selected.occurrence ? nil : try get(nativeID: originalAnchor.nativeID, calendarID: originalAnchor.calendarNativeID, occurrence: originalAnchor.occurrence, knownStart: parseDate(originalAnchor.fields.start))
+        let past = originalAnchor.occurrence == selected.occurrence ? nil : try FuturePattern.prefixMaster(firstSeriesOccurrence(for: originalAnchor), retained: originalAnchor)
         return FutureRemovalResult(pastAnchor: past)
     }
     public func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
@@ -278,7 +278,7 @@ public final class SyntheticBackend: CalendarBackend {
             throw CoreError("stale_rollback", "Original boundary reappeared before independent creation")
         } catch let error as CoreError where error.code == "event_missing" { }
         if let expectedPrefix {
-            guard try get(nativeID: expectedPrefix.nativeID, calendarID: calendarID, occurrence: expectedPrefix.occurrence, knownStart: parseDate(expectedPrefix.fields.start)) == expectedPrefix else { throw CoreError("stale_rollback", "Original prefix changed immediately before independent creation") }
+            guard try FuturePattern.prefixMaster(firstSeriesOccurrence(for: expectedPrefix), retained: expectedPrefix) == expectedPrefix else { throw CoreError("stale_rollback", "Original prefix changed immediately before independent creation") }
         }
         writeCount += 1
         var snapshot = details.object!; snapshot["recurrence_rules"] = .array([recurrence.rawRule])
@@ -317,7 +317,7 @@ public final class SyntheticBackend: CalendarBackend {
         }
         if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-write failure") }
         let saved = try get(nativeID: tailID, calendarID: selected.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start))
-        let prefix = split ? try get(nativeID: originalAnchor.nativeID, calendarID: originalAnchor.calendarNativeID, occurrence: originalAnchor.occurrence, knownStart: parseDate(originalAnchor.fields.start)) : nil
+        let prefix = split ? try FuturePattern.prefixMaster(firstSeriesOccurrence(for: originalAnchor), retained: originalAnchor) : nil
         return FutureWriteResult(boundary: saved, pastAnchor: prefix)
     }
     public func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord {

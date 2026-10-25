@@ -80,6 +80,9 @@ final class EventKitBackend: CalendarBackend {
     func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord {
         try refresh(); return try record(firstSeriesEvent(for: selected))
     }
+    private func prefixMaster(for retained: EventRecord) throws -> EventRecord {
+        try FuturePattern.prefixMaster(record(firstSeriesEvent(for: retained)), retained: retained)
+    }
     func removeFuture(selected: EventRecord, originalAnchor: EventRecord, boundaryNow: () -> Date) throws -> FutureRemovalResult {
         try refresh()
         guard let calendar = store.calendar(withIdentifier: selected.calendarNativeID), self.calendar(calendar).writable else { throw CoreError("read_only", "Calendar is no longer writable") }
@@ -90,7 +93,7 @@ final class EventKitBackend: CalendarBackend {
         _ = try FuturePattern.boundary(selected, now: boundaryNow())
         try store.remove(event, span: .futureEvents, commit: true)
         try refresh()
-        let past = originalAnchor.occurrence == selected.occurrence ? nil : try record(resolve(nativeID: originalAnchor.nativeID, calendarID: originalAnchor.calendarNativeID, occurrence: originalAnchor.occurrence, knownStart: parseDate(originalAnchor.fields.start)))
+        let past = originalAnchor.occurrence == selected.occurrence ? nil : try prefixMaster(for: originalAnchor)
         return FutureRemovalResult(pastAnchor: past)
     }
     func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
@@ -119,7 +122,7 @@ final class EventKitBackend: CalendarBackend {
             throw CoreError("stale_rollback", "Original boundary reappeared immediately before independent creation")
         } catch let error as CoreError where error.code == "event_missing" { }
         if let expectedPrefix {
-            guard try record(resolve(nativeID: expectedPrefix.nativeID, calendarID: calendarID, occurrence: expectedPrefix.occurrence, knownStart: parseDate(expectedPrefix.fields.start))) == expectedPrefix else { throw CoreError("stale_rollback", "Original prefix changed immediately before independent creation") }
+            guard try prefixMaster(for: expectedPrefix) == expectedPrefix else { throw CoreError("stale_rollback", "Original prefix changed immediately before independent creation") }
         }
         try store.save(event, span: .futureEvents, commit: true)
         let saved = try record(event)
@@ -166,7 +169,7 @@ final class EventKitBackend: CalendarBackend {
         let boundary = try record(resolve(nativeID: saved.nativeID, calendarID: saved.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start)))
         let past: EventRecord?
         if originalAnchor.occurrence != selected.occurrence {
-            past = try record(resolve(nativeID: originalAnchor.nativeID, calendarID: originalAnchor.calendarNativeID, occurrence: originalAnchor.occurrence, knownStart: parseDate(originalAnchor.fields.start)))
+            past = try prefixMaster(for: originalAnchor)
         } else { past = nil }
         return FutureWriteResult(boundary: boundary, pastAnchor: past)
     }

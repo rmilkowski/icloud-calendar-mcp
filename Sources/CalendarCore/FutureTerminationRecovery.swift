@@ -10,6 +10,10 @@ extension Broker {
         guard binding.occurrence == snapshot["occurrence"].string else { throw CoreError("stale_rollback", "Original occurrence binding changed") }
         return EventRecord(nativeID: binding.nativeID, calendarNativeID: binding.calendarID, occurrence: binding.occurrence, fields: try EventFields(json: snapshot["fields"]), recurring: recurring, detached: detached, hasAttendees: attendees, hasOrganizer: organizer, availability: availability, status: status, details: snapshot["details"])
     }
+    func retainedPrefixMaster(_ snapshot: JSON) throws -> EventRecord {
+        let retained = try recordFromSnapshot(snapshot)
+        return try FuturePattern.prefixMaster(backend.firstSeriesOccurrence(for: retained), retained: retained)
+    }
     func terminationRestoreState(_ execution: (payload: JSON, state: String, result: JSON)) throws -> (selected: EventRecord, past: JSON, calendar: JSON, fields: EventFields) {
         let source = execution.payload
         guard source["version"] == .int(6), source["action"] == .string("delete"), source["rollback"] == .null,
@@ -25,7 +29,7 @@ extension Broker {
             try requireAbsent(anchor); guard execution.result["past_anchor"] == .null else { throw CoreError("state_corrupt", "Unexpected retained prefix") }; past = .null
         } else {
             guard let id = execution.result["past_anchor"]["id"].string, id == source["future"]["first_anchor"]["id"].string else { throw CoreError("state_corrupt", "Missing original prefix identity") }
-            let current = try event(id); past = try view(current)
+            let current = try retainedPrefixMaster(execution.result["past_anchor"]); past = try view(current)
             guard EventSnapshot.equivalent(past, execution.result["past_anchor"]) else { throw CoreError("stale_rollback", "Original prefix changed or regrew after termination") }
             try verifiedEarlierAnchor(current, original: anchor, boundary: selected)
         }
@@ -83,7 +87,7 @@ extension Broker {
                   EventSnapshot.detailsEquivalent(recoveryDetails(saved.details), envelope["rollback"]["restoration"]["details"]) else { throw CoreError("verification_failed", "The independent copied series differs from the exact retained creation") }
             try requireAbsent(verified.selected)
             if verified.past != .null {
-                guard let id = verified.past["id"].string, EventSnapshot.equivalent(try view(event(id)), verified.past) else { throw CoreError("verification_failed", "The original prefix changed during independent-copy creation") }
+                guard EventSnapshot.equivalent(try view(retainedPrefixMaster(verified.past)), verified.past) else { throw CoreError("verification_failed", "The original prefix changed during independent-copy creation") }
             }
             guard try state.rows("SELECT id FROM identities WHERE kind='event' AND native_id=? AND calendar_id=? AND occurrence=?", [saved.nativeID, saved.calendarNativeID, saved.occurrence ?? ""]).isEmpty else { throw CoreError("verification_failed", "Independent creation returned a previously bound event identity") }
             let newView = try view(saved)
