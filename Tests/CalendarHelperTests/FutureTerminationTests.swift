@@ -345,7 +345,7 @@ final class FutureTerminationTests: XCTestCase {
             history = try Dictionary(uniqueKeysWithValues: tables.map { ($0, try state.rows("SELECT * FROM " + $0 + " ORDER BY rowid")) })
             identityMetadata = try state.rows("SELECT * FROM metadata WHERE key NOT IN ('recovery_storage_version','recovery_clock_highwater') ORDER BY key")
         }
-        do { let state = try StateStore(directory: directory); XCTAssertEqual(try state.metadata("recovery_storage_version"), "6"); for table in tables { XCTAssertEqual(try state.rows("SELECT * FROM " + table + " ORDER BY rowid"), history[table]) }; XCTAssertEqual(try state.rows("SELECT * FROM metadata WHERE key NOT IN ('recovery_storage_version','recovery_clock_highwater') ORDER BY key"), identityMetadata) }
+        do { let state = try StateStore(directory: directory); XCTAssertEqual(try state.metadata("recovery_storage_version"), "7"); for table in tables { XCTAssertEqual(try state.rows("SELECT * FROM " + table + " ORDER BY rowid"), history[table]) }; XCTAssertEqual(try state.rows("SELECT * FROM metadata WHERE key NOT IN ('recovery_storage_version','recovery_clock_highwater') ORDER BY key"), identityMetadata) }
         let frozen = "/private/tmp/calendar-future-v5-freeze-p9j0kpd_/CalendarHelper"
         guard FileManager.default.isExecutableFile(atPath: frozen) else { throw XCTSkip("Frozen v5 floor-four helper unavailable") }
         XCTAssertEqual(digest(try Data(contentsOf: URL(fileURLWithPath: frozen))), "4b7895c799f0be55c6b4052df5e4bfa522e3c396a551ddec77c68c273acaf347")

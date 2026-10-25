@@ -4,7 +4,7 @@ import Darwin
 
 extension StateStore {
     public func recoveryMetadata() throws -> JSON {
-        .object(["storage_version": .int(6), "execution_count": .int(try rows("SELECT nonce FROM executions").count), "retained_detail_count": .int(try rows("SELECT nonce FROM execution_keys").count), "expired_detail_count": .int(try rows("SELECT nonce FROM execution_details WHERE expired=1").count), "unresolved_count": .int(try rows("SELECT nonce FROM executions WHERE state IN ('intent_recorded','unknown')").count), "audit_record_count": .int(try rows("SELECT sequence FROM audit").count), "cleanup_complete": .bool(try metadata("recovery_cleanup_pending") != "true")])
+        .object(["storage_version": .int(7), "execution_count": .int(try rows("SELECT nonce FROM executions").count), "retained_detail_count": .int(try rows("SELECT nonce FROM execution_keys").count), "expired_detail_count": .int(try rows("SELECT nonce FROM execution_details WHERE expired=1").count), "unresolved_count": .int(try rows("SELECT nonce FROM executions WHERE state IN ('intent_recorded','unknown')").count), "audit_record_count": .int(try rows("SELECT sequence FROM audit").count), "cleanup_complete": .bool(try metadata("recovery_cleanup_pending") != "true")])
     }
     /// Fixed local configuration. Neither transport nor signed previews can change retention.
     public func recoveryPolicy() throws -> JSON {
@@ -61,7 +61,7 @@ extension StateStore {
     }
     func minimalResult(nonce: String, state: String, result: JSON) -> JSON {
         var value: [String: JSON] = ["storage_version": .int(2), "nonce": .string(nonce), "state": .string(state)]
-        for key in ["action", "audit_sequence", "outcome", "rollback_of", "event_id", "parent_nonce", "completed", "remaining", "stopped_reason"] where result[key] != .null { value[key] = result[key] }
+        for key in ["action", "audit_sequence", "outcome", "rollback_of", "event_id", "parent_nonce", "completed", "remaining", "stopped_reason", "execution_evidence", "diagnostic"] where result[key] != .null { value[key] = result[key] }
         return .object(value)
     }
     func storeIntent(nonce: String, payload: JSON, result: JSON, now: Date, marker: JSON) throws {
@@ -84,7 +84,7 @@ extension StateStore {
     func safeAuditPayload(event: String, nonce: String?, payload: JSON) -> JSON {
         if event.hasPrefix("write_safety_") || event.contains("credential") || event == "recovery_migration_checkpoint" || event == "details_expired" || event == "commit_observation_checkpoint" { return payload }
         var result: [String: JSON] = [:]
-        for key in ["storage_version", "state", "action", "audit_sequence", "code", "op", "outcome", "rollback_of", "event_id", "parent_nonce", "stopped_reason", "resolution_source", "verification", "reconciliation_nonce"] where payload[key] != .null { result[key] = payload[key] }
+        for key in ["storage_version", "state", "action", "audit_sequence", "code", "op", "outcome", "rollback_of", "event_id", "parent_nonce", "stopped_reason", "resolution_source", "verification", "reconciliation_nonce", "execution_evidence", "diagnostic"] where payload[key] != .null { result[key] = payload[key] }
         if let nonce { result["detail_reference"] = .string(nonce) }
         if let data = try? payload.data() { result["detail_digest"] = .string(digest(data)) }
         return .object(result)
@@ -121,7 +121,7 @@ extension StateStore {
         }
     }
     func migrateRecoveryStorage() throws {
-        if let version = try metadata("recovery_storage_version"), !["2", "3", "4", "5", "6"].contains(version) { throw CoreError("state_version", "Unsupported recovery storage version") }
+        if let version = try metadata("recovery_storage_version"), !["2", "3", "4", "5", "6", "7"].contains(version) { throw CoreError("state_version", "Unsupported recovery storage version") }
         try execute("CREATE TABLE IF NOT EXISTS execution_details(nonce TEXT PRIMARY KEY,payload_cipher TEXT NOT NULL,result_cipher TEXT NOT NULL,captured TEXT NOT NULL,expires TEXT NOT NULL,expired INTEGER NOT NULL CHECK(expired IN (0,1)))")
         try execute("CREATE INDEX IF NOT EXISTS execution_details_expiry ON execution_details(expired,expires)")
         try execute("CREATE TABLE IF NOT EXISTS execution_keys(nonce TEXT PRIMARY KEY,key TEXT NOT NULL)")
@@ -130,8 +130,8 @@ extension StateStore {
         try execute("CREATE TABLE IF NOT EXISTS legacy_audit_manifest(sequence INTEGER PRIMARY KEY,body TEXT NOT NULL)")
         try verifyAudit()
         let legacy = try rows("SELECT nonce,payload,state,result,created FROM executions WHERE COALESCE(json_extract(payload,'$.storage_version'),0)<>2")
-        guard try !["3", "4", "5", "6"].contains(metadata("recovery_storage_version") ?? "") || legacy.isEmpty else { throw CoreError("state_corrupt", "Writer-floor v3/v4/v5/v6 requires existing encrypted v2 journal encoding; repair forward without rewriting authoritative history") }
-        if try !["2", "3", "4", "5", "6"].contains(metadata("recovery_storage_version") ?? "") || !legacy.isEmpty {
+        guard try !["3", "4", "5", "6", "7"].contains(metadata("recovery_storage_version") ?? "") || legacy.isEmpty else { throw CoreError("state_corrupt", "Current writer floor requires existing encrypted v2 journal encoding; repair forward without rewriting authoritative history") }
+        if try !["2", "3", "4", "5", "6", "7"].contains(metadata("recovery_storage_version") ?? "") || !legacy.isEmpty {
             let oldAudit = try rows("SELECT sequence,hash FROM audit ORDER BY sequence DESC LIMIT 1").first
             let oldBodies = try rows("SELECT sequence,body,previous_hash,hash FROM audit ORDER BY sequence")
             let conversion = digest(Data(try JSON.array(legacy.map { .array($0.map(JSON.string)) }).text().utf8))
@@ -171,10 +171,10 @@ extension StateStore {
             try execute("VACUUM")
             try execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('recovery_cleanup_pending','false')")
         }
-        // Metadata v6 is a forward-only writer compatibility floor. The encrypted
+        // Metadata v7 is a forward-only writer compatibility floor. The encrypted
         // detail/marker encoding remains v2; older helpers reject before serving.
-        if try metadata("recovery_storage_version") != "6" {
-            try transaction { try execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('recovery_storage_version','6')") }
+        if try metadata("recovery_storage_version") != "7" {
+            try transaction { try execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('recovery_storage_version','7')") }
         }
     }
     func verifyLegacyManifest() throws {

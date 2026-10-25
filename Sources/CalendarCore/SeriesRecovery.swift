@@ -15,6 +15,7 @@ extension Broker {
     func rejectSeriesCrossing(_ sources: [[String]]) throws {
         guard let earliest = sources.compactMap({ Int($0[7]) }).min(), !sources.isEmpty else { throw CoreError("invalid_selection", "Missing rollback history") }
         for row in try state.recoveryRows() where (Int(row[7]) ?? 0) > earliest {
+            if try state.isProvenNotApplied(row) { continue }
             if try isAllDayExecution(row) {
                 guard try sources.allSatisfy({ try state.executionsProvenDisjoint($0, from: row) }) else { throw CoreError("rollback_all_day_boundary", "Ordinary recovery cannot cross related civil-date history") }
             }
@@ -26,6 +27,7 @@ extension Broker {
     func rejectLaterCalendarIntent(after source: [String], calendar: String) throws {
         guard let rowID = Int(source[7]) else { throw CoreError("state_corrupt", "Invalid execution order") }
         for row in try state.recoveryRows() where (Int(row[7]) ?? 0) > rowID {
+            if try state.isProvenNotApplied(row) { continue }
             guard try state.executionsProvenDisjoint(source, from: row) else { throw CoreError("rollback_series_boundary", "Possibly related later execution history prevents series default-field recovery") }
         }
     }

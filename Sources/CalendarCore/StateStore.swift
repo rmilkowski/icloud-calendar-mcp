@@ -7,6 +7,7 @@ public final class StateStore {
     var database: OpaquePointer?
     private var lockFD: Int32 = -1
     var localNativeReview = false
+    var provenNotApplied: [String: String] = [:]
     public let directory: URL
     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     public init(directory: URL) throws {
@@ -244,6 +245,7 @@ public final class StateStore {
         if let rejection = result.rejection { throw rejection }; return result.sequence!
     }
     public func finish(nonce: String, state: String, result: JSON, event: String) throws {
+        guard state != "not_applied", event != "write_not_applied" else { throw CoreError("state_corrupt", "Native non-execution needs its dedicated atomic proof path") }
         try transaction {
             guard try execution(nonce) != nil else { throw CoreError("audit_unavailable", "Execution journal missing") }
             try storeResult(nonce: nonce, state: state, result: result)
@@ -265,7 +267,7 @@ public final class StateStore {
         let sequence = (last.flatMap { Int($0[0]) } ?? 0) + 1
         let previous = last?[1] ?? String(repeating: "0", count: 64)
         let origin = ["recovery_migration_checkpoint", "details_expired", "commit_observation_checkpoint"].contains(event) ? "native_maintenance" : (event == "operator_reconciliation" ? "local_operator_attestation" : (event.contains("credential") || event == "write_safety_policy_changed" ? "local_configuration" : (event == "recovered_unknown" ? "native_recovery" : "chatgpt_host_policy")))
-        let localWriteEvent = localNativeReview && ["write_intent", "write_applied", "write_unknown", "commit_replayed", "commit_rejected", "write_safety_charged", "write_safety_rejected"].contains(event)
+        let localWriteEvent = localNativeReview && ["write_intent", "write_applied", "write_unknown", "write_not_applied", "commit_replayed", "commit_rejected", "write_safety_charged", "write_safety_rejected"].contains(event)
         let body: JSON = .object(["version": .int(2), "record_sequence": .int(sequence), "event_id": .string(UUID().uuidString), "timestamp": .string(iso(Date())), "event": .string(event), "nonce": .optional(nonce), "approval_source": .string(localWriteEvent ? "local_native_ui" : origin), "approval_evidence": .string(localWriteEvent ? "native_control_activated" : "not_provided"), "payload": safeAuditPayload(event: event, nonce: nonce, payload: payload)])
         let hash = digest(Data(previous.utf8) + (try body.data()))
         try execute("INSERT INTO audit(sequence,body,previous_hash,hash) VALUES(?,?,?,?)", [String(sequence), try body.text(), previous, hash]); return sequence
@@ -273,14 +275,24 @@ public final class StateStore {
     func auditSequence(_ body: JSON) throws -> Int? { body["version"] == .int(2) ? body["record_sequence"].integer : body["sequence"].integer }
     public func verifyAudit() throws {
         var previous = String(repeating: "0", count: 64); var sequence = 0
+        var notAppliedAudits: [String: JSON] = [:]
         for row in try rows("SELECT sequence,body,previous_hash,hash FROM audit ORDER BY sequence") {
             sequence += 1
             guard row[0] == String(sequence), row[2] == previous,
                   digest(Data(previous.utf8) + Data(row[1].utf8)) == row[3],
                   try auditSequence(JSON.parse(Data(row[1].utf8))) == sequence else { throw CoreError("audit_corrupt", "Audit chain verification failed; writes disabled") }
+            let body = try JSON.parse(Data(row[1].utf8))
+            if body["event"] == .string("write_not_applied") {
+                guard body["version"] == .int(2), let nonce = body["nonce"].string, notAppliedAudits[nonce] == nil,
+                      (body["approval_source"] == .string("chatgpt_host_policy") && body["approval_evidence"] == .string("not_provided"))
+                        || (body["approval_source"] == .string("local_native_ui") && body["approval_evidence"] == .string("native_control_activated")) else { throw CoreError("audit_corrupt", "Invalid native non-execution audit provenance") }
+                notAppliedAudits[nonce] = .object(["storage_version": .int(2), "nonce": .string(nonce), "state": .string("not_applied"), "action": body["payload"]["action"], "audit_sequence": body["payload"]["audit_sequence"], "execution_evidence": body["payload"]["execution_evidence"], "diagnostic": body["payload"]["diagnostic"]])
+                guard body["payload"]["state"] == .string("not_applied") else { throw CoreError("audit_corrupt", "Invalid native non-execution audit state") }
+            }
             previous = row[3]
         }
-        if try ["2", "3", "4", "5", "6"].contains(metadata("recovery_storage_version") ?? "") { try verifyLegacyManifest() }
+        try validateNotAppliedHistory(notAppliedAudits)
+        if try ["2", "3", "4", "5", "6", "7"].contains(metadata("recovery_storage_version") ?? "") { try verifyLegacyManifest() }
     }
     public func auditRecords() throws -> [JSON] { try rows("SELECT body FROM audit ORDER BY sequence").map { try JSON.parse(Data($0[0].utf8)) } }
 }

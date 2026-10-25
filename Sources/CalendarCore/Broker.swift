@@ -83,7 +83,7 @@ public final class Broker: @unchecked Sendable {
             return try state.commitObservationStatus()
         case "recovery_capabilities":
             _ = try Arguments(arguments, allowed: [])
-            return .object(["version": .int(1), "storage_version": .int(6), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
+            return .object(["version": .int(1), "storage_version": .int(7), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
         case "list_changes": return try listChanges(arguments)
         case "get_stored_change": return try storedChange(arguments)
         case "preflight_rollback": return try preflightRollback(arguments)
@@ -266,14 +266,17 @@ public final class Broker: @unchecked Sendable {
         }
         let auditSequence = try state.claim(nonce: nonce, payload: envelope, now: current)
         let result: JSON
+        var verificationStage: WriteFailureStage = .providerMutation
         do {
             let written: EventRecord?
             if rollback && action == "create", let fields {
-                written = try backend.restore(calendarID: pair.0.nativeID, fields: fields, details: envelope["rollback"]["restoration"]["details"], availability: envelope["rollback"]["restoration"]["availability"].string!)
+                written = try providerMutation { try backend.restore(calendarID: pair.0.nativeID, fields: fields, details: envelope["rollback"]["restoration"]["details"], availability: envelope["rollback"]["restoration"]["availability"].string!) }
             } else if rollback && action == "modify", let existing, let fields, envelope["rollback"].object?["alarm_restoration"] != nil {
-                written = try backend.applyRestoringAlarms(calendarID: pair.0.nativeID, existing: existing, fields: fields, alarms: envelope["rollback"]["alarm_restoration"])
-            } else { written = try backend.apply(action: action, calendarID: pair.0.nativeID, existing: existing, fields: fields) }
+                written = try providerMutation { try backend.applyRestoringAlarms(calendarID: pair.0.nativeID, existing: existing, fields: fields, alarms: envelope["rollback"]["alarm_restoration"]) }
+            } else { written = try providerMutation { try backend.apply(action: action, calendarID: pair.0.nativeID, existing: existing, fields: fields) } }
+            verificationStage = .resultVerification
             if action == "delete" {
+                verificationStage = .boundaryAbsence
                 guard let existing else { throw CoreError("verification_failed", "Missing delete identity") }
                 do { _ = try backend.get(nativeID: existing.nativeID, calendarID: existing.calendarNativeID, occurrence: existing.occurrence, knownStart: parseDate(existing.fields.start)); throw CoreError("verification_failed", "Deleted event still resolves") }
                 catch let error as CoreError where error.code == "event_missing" { }
@@ -314,11 +317,9 @@ public final class Broker: @unchecked Sendable {
                 } else { result = .object(["nonce": .string(nonce), "state": .string("applied"), "action": .string(action), "event": try view(refreshed), "audit_sequence": .int(auditSequence)]) }
             }
         } catch {
-            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string(action), "audit_sequence": .int(auditSequence), "message": .string("Write may have happened; do not retry. Inspect the original nonce and reconcile before related changes")])
-            try? state.finish(nonce: nonce, state: "unknown", result: unknown, event: "write_unknown")
-            return unknown
+            return writeFailure(error, nonce: nonce, action: action, sequence: auditSequence, stage: verificationStage)
         }
         do { try state.finish(nonce: nonce, state: "applied", result: result, event: "write_applied"); return result }
-        catch { return .object(["nonce": .string(nonce), "state": .string("unknown"), "message": .string("EventKit returned but durable outcome recording failed; do not retry. Inspect the original nonce before related writes")]) }
+        catch { return unknownWrite(error, nonce: nonce, action: action, sequence: auditSequence, stage: .outcomePersistence) }
     }
 }

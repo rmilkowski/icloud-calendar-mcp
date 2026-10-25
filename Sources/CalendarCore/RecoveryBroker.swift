@@ -141,7 +141,7 @@ extension Broker {
         }
         let filters = try validatedFilters(arguments, allowSelection: true)
         guard arguments["all"] == .bool(true) else { throw CoreError("invalid_selection", "Provide change_ids or all:true with optional filters") }
-        let rows = try matchingRows(filters).filter { try state.rollbackOwner($0[0]) == nil }
+        let rows = try matchingRows(filters).filter { try !state.isProvenNotApplied($0) && state.rollbackOwner($0[0]) == nil }
         guard !rows.isEmpty else { throw CoreError("empty_selection", "No eligible retained changes match") }
         guard rows.count <= 25 else { throw CoreError("selection_too_large", "More than 25 changes match; narrow the filters or select an explicit batch") }
         return rows
@@ -159,6 +159,7 @@ extension Broker {
         }
         var previousAfter: JSON?, previousAction: String?
         for row in history {
+            if try state.isProvenNotApplied(row) { continue }
             guard row[2] == "applied", row[6] == "0", let execution = try state.execution(row[0]), execution.payload["storage_version"] == .null else { throw CoreError("rollback_history_gap", "Historical bridge evidence is expired or unverified; inspect this event locally") }
             let action = execution.payload["action"].string!
             if let previousAfter {
@@ -181,6 +182,7 @@ extension Broker {
         for row in sources { guard try changeSummary(row, held: held)["recovery_eligible"] == .bool(true) else { throw CoreError("rollback_ineligible", "A selected change is expired, unverified, consumed or unsupported") } }
         let marker = try JSON.parse(Data(first[1].utf8)), eventID = marker["event_id"].string!
         let all = try state.recoveryRows(), active = try all.filter { row in
+            if try state.isProvenNotApplied(row) { return false }
             let m = try JSON.parse(Data(row[1].utf8))
             let owner = try state.rollbackOwner(row[0])
             return m["event_id"] == .string(eventID) && m["rollback_of"] == .null && ["modify", "delete"].contains(m["action"].string ?? "") && owner == nil
@@ -188,6 +190,7 @@ extension Broker {
         guard Array(active.suffix(sources.count)).map({ $0[0] }) == sources.map({ $0[0] }) else { throw CoreError("rollback_lineage", "Select a contiguous suffix of the event's remaining changes, including newer changes") }
         try validateHistoryBridges(all, eventID: eventID, startingAt: Int(first[7])!)
         guard let original = try state.execution(first[0])?.payload, let latest = try all.last(where: { row in
+            if try state.isProvenNotApplied(row) { return false }
             let m = try JSON.parse(Data(row[1].utf8)); return m["event_id"] == .string(eventID)
         }), latest[2] == "applied", let latestExecution = try state.execution(latest[0]) else { throw CoreError("rollback_lineage", "Latest integration outcome is not verified") }
         let desired = original["before"], calendar = desired["calendar"]

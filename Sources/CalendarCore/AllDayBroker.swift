@@ -149,8 +149,10 @@ extension Broker {
         try requireAllDayZone(interval.projectionTimeZone); try requireAllDayExpiry(envelope)
         let sequence = try state.claim(nonce: nonce, payload: envelope, now: now())
         let result: JSON
+        var verificationStage: WriteFailureStage = .providerMutation
         do {
-            let saved = try backend.applyAllDay(calendarID: pair.0.nativeID, existing: existing, fields: fields, interval: interval, restoredAlarms: alarms)
+            let saved = try providerMutation { try backend.applyAllDay(calendarID: pair.0.nativeID, existing: existing, fields: fields, interval: interval, restoredAlarms: alarms) }
+            verificationStage = .resultVerification
             let observed = try backend.get(nativeID: saved.nativeID, calendarID: saved.calendarNativeID, occurrence: saved.occurrence, knownStart: parseDate(saved.fields.start))
             try requireAllDayZone(interval.projectionTimeZone)
             try verifyAllDayResult(observed, existing: existing, fields: fields, interval: interval, calendarID: pair.0.nativeID, restoredAlarms: alarms)
@@ -159,11 +161,10 @@ extension Broker {
             if rollback { response["rollback_of"] = envelope["rollback"]["source_change_ids"]; response["event_id"] = envelope["before"]["id"] }
             result = .object(response)
         } catch {
-            let result: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string(action), "audit_sequence": .int(sequence), "message": .string("All-day write may have happened; do not retry. Inspect the original nonce and reconcile before related changes")])
-            try? state.finish(nonce: nonce, state: "unknown", result: result, event: "write_unknown"); return result
+            return writeFailure(error, nonce: nonce, action: action, sequence: sequence, stage: verificationStage)
         }
         do { try state.finish(nonce: nonce, state: "applied", result: result, event: "write_applied"); return result }
-        catch { return .object(["nonce": .string(nonce), "state": .string("unknown"), "message": .string("All-day provider returned but durable outcome recording failed; inspect the original nonce")]) }
+        catch { return unknownWrite(error, nonce: nonce, action: action, sequence: sequence, stage: .outcomePersistence) }
     }
     func requireAllDayExpiry(_ envelope: JSON) throws {
         let current = now(), issued = try parseDate(envelope["issued_at"].string ?? ""), expiry = try parseDate(envelope["expires_at"].string ?? "")

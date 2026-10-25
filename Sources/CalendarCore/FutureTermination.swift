@@ -135,17 +135,19 @@ extension Broker {
         let claimedAt = try terminationFreshTime(envelope, restore: false)
         let sequence = try state.claim(nonce: nonce, payload: envelope, now: claimedAt)
         let result: JSON
+        var verificationStage: WriteFailureStage = .providerMutation
         do {
-            let removed = try backend.removeFuture(selected: selection.selected, originalAnchor: selection.anchor, boundaryNow: now)
+            let removed = try providerMutation { try backend.removeFuture(selected: selection.selected, originalAnchor: selection.anchor, boundaryNow: now) }
+            verificationStage = .resultVerification
+            verificationStage = .boundaryAbsence
             try requireAbsent(selection.selected)
             if selection.selected.occurrence == selection.anchor.occurrence { guard removed.pastAnchor == nil else { throw CoreError("verification_failed", "Unexpected earlier anchor") }; try requireAbsent(selection.anchor) }
-            else { guard let past = removed.pastAnchor else { throw CoreError("verification_failed", "Earlier anchor witness is unavailable") }; try verifiedEarlierAnchor(past, original: selection.anchor, boundary: selection.selected) }
+            else { verificationStage = .prefixVerification; guard let past = removed.pastAnchor else { throw CoreError("verification_failed", "Earlier anchor witness is unavailable") }; try verifiedEarlierAnchor(past, original: selection.anchor, boundary: selection.selected) }
             result = .object(["nonce": .string(nonce), "state": .string("applied"), "action": .string("delete"), "event": .null, "deleted_boundary": selection.before, "past_anchor": try removed.pastAnchor.map { try view($0, knownCalendar: envelope["calendar"]) } ?? .null, "boundary": envelope["future"]["boundary"], "cutoff": envelope["future"]["cutoff"], "audit_sequence": .int(sequence)])
         } catch {
-            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string("delete"), "audit_sequence": .int(sequence), "message": .string("Future termination may have happened; do not retry. Inspect the original nonce and reconcile before related changes")])
-            try? state.finish(nonce: nonce, state: "unknown", result: unknown, event: "write_unknown"); return unknown
+            return writeFailure(error, nonce: nonce, action: "delete", sequence: sequence, stage: verificationStage)
         }
         do { try state.finish(nonce: nonce, state: "applied", result: result, event: "write_applied"); return result }
-        catch { return .object(["nonce": .string(nonce), "state": .string("unknown"), "message": .string("Termination returned but durable outcome recording failed; inspect the original nonce")]) }
+        catch { return unknownWrite(error, nonce: nonce, action: "delete", sequence: sequence, stage: .outcomePersistence) }
     }
 }

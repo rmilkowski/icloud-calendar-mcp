@@ -101,7 +101,7 @@ final class AllDayDatesTests: XCTestCase {
             let state = try state(), backend = SyntheticBackend(); backend.allDayUsesExclusiveEnd = exclusive
             let broker = Broker(state: state, backend: backend)
             XCTAssertEqual(call(broker, "all_day_dates_capabilities")["result"], Broker.allDayDatesCapabilities)
-            XCTAssertEqual(call(broker, "recovery_capabilities")["result"]["storage_version"], .int(6))
+            XCTAssertEqual(call(broker, "recovery_capabilities")["result"]["storage_version"], .int(7))
             let response = draft(broker), preview = response["result"]["preview"], envelope = preview["envelope"]
             XCTAssertEqual(response["error"], .null, "\(response)")
             XCTAssertEqual(envelope["version"], .int(7)); XCTAssertEqual(envelope["all_day"]["after"], dates())
@@ -411,7 +411,7 @@ final class AllDayDatesTests: XCTestCase {
         }
         do {
             let state = try self.state(directory)
-            XCTAssertEqual(try state.metadata("recovery_storage_version"), "6")
+            XCTAssertEqual(try state.metadata("recovery_storage_version"), "7")
             for table in tables { XCTAssertEqual(try state.rows("SELECT * FROM " + table + " ORDER BY rowid"), proof[table]) }
             XCTAssertEqual(try state.rows("SELECT * FROM metadata WHERE key NOT IN ('recovery_storage_version','recovery_clock_highwater') ORDER BY key"), metadata)
             XCTAssertEqual(try state.rows("SELECT count(*) FROM executions")[0][0], "2")

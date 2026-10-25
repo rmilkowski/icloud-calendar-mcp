@@ -62,7 +62,7 @@ final class SeriesModificationTests: XCTestCase {
     func testExactCapabilityFloorFirstAnchorFieldPropagationAndOneIntentQuota() throws {
         let state = try store(), base = try fixture(), broker = Broker(state: state, backend: base), views = events(broker)
         XCTAssertEqual(call(broker, "series_modification_capabilities")["result"], Broker.seriesModificationCapabilities)
-        XCTAssertEqual(call(broker, "recovery_capabilities")["result"]["storage_version"], .int(6))
+        XCTAssertEqual(call(broker, "recovery_capabilities")["result"]["storage_version"], .int(7))
         let response = draft(broker, id: views[1]["id"], fields: ["title": .string("New default"), "notes": .string("New notes")]), preview = response["result"]["preview"], envelope = preview["envelope"]
         XCTAssertEqual(envelope["version"], .int(4)); XCTAssertEqual(envelope["series"]["selected"], views[1]); XCTAssertEqual(envelope["before"], views[0])
         XCTAssertEqual(envelope["series"]["changed_fields"], .array([.string("notes"), .string("title")]))
@@ -347,7 +347,7 @@ final class SeriesModificationTests: XCTestCase {
             let result = commit(broker, draft(broker, id: id, fields: ["title": .string("Persisted series")])["result"]["preview"])
             XCTAssertEqual(result["result"]["state"], .string("applied")); XCTAssertEqual(commit(broker, draft(broker, id: id, fields: ["notes": .string("Retained notes")])["result"]["preview"])["result"]["state"], .string("applied"))
             snapshots = try Dictionary(uniqueKeysWithValues: tables.map { ($0, try state.rows("SELECT * FROM " + $0 + " ORDER BY rowid")) })
-            XCTAssertEqual(try state.metadata("recovery_storage_version"), "6")
+            XCTAssertEqual(try state.metadata("recovery_storage_version"), "7")
             XCTAssertTrue(try state.rows("SELECT payload FROM executions").allSatisfy { (try? JSON.parse(Data($0[0].utf8))["storage_version"]) == .int(2) })
         }
         let frozen = "/private/tmp/calendar-recurrence-validated-raw/CalendarHelper"
@@ -359,6 +359,6 @@ final class SeriesModificationTests: XCTestCase {
         XCTAssertEqual(try JSON.parse(output.fileHandleForReading.readDataToEndOfFile())["error"]["code"], .string("state_version"))
         let reopened = try StateStore(directory: dir)
         for table in tables { XCTAssertEqual(try reopened.rows("SELECT * FROM " + table + " ORDER BY rowid"), snapshots[table]) }
-        XCTAssertEqual(try reopened.metadata("recovery_storage_version"), "6"); try reopened.verifyAudit()
+        XCTAssertEqual(try reopened.metadata("recovery_storage_version"), "7"); try reopened.verifyAudit()
     }
 }

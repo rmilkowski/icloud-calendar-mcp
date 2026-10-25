@@ -147,27 +147,24 @@ final class JournalReconciliationTests: XCTestCase {
         XCTAssertThrowsError(try state.claim(nonce: p["envelope"]["nonce"].string!, payload: .object(payload), now: clock.value))
         XCTAssertEqual(try state.rows("SELECT * FROM executions").count, 1); XCTAssertEqual(try state.rows("SELECT * FROM execution_keys").count, 1)
     }
-    func testFrozenFloorSixHelperOpensAndReplaysReconciledHistoryWithoutReinterpretation() throws {
+    func testFrozenFloorSixHelperRejectsSevenWithoutReinterpretingReconciledHistory() throws {
         guard let helper = ProcessInfo.processInfo.environment["CALENDAR_MCP_FROZEN_FLOOR6_HELPER"] else { throw XCTSkip("Set the frozen floor-6 helper for compatibility validation") }
-        let dir = directory(), clock = JournalClock(); var original: JSON!, expected: JSON!, retained: [[String]]!, claims: [[String]]!
+        let dir = directory(), clock = JournalClock(); var original: JSON!, retained: [[String]]!, claims: [[String]]!
         do {
             let state = try store(dir); original = try seed(state, clock)
             let broker = Broker(state: state, backend: NoCalendarBackend(), now: { clock.value })
             _ = call(broker, "commit_reconciliation", ["preview": preview(broker, id: original["envelope"]["nonce"])])
-            expected = try state.execution(original["envelope"]["nonce"].string!)!.result
             retained = try state.rows("SELECT rowid,* FROM executions"); claims = try state.rows("SELECT rowid,* FROM reconciliation_claims")
         }
-        let process = Process(), input = Pipe(), output = Pipe()
+        let process = Process(), output = Pipe()
         process.executableURL = URL(fileURLWithPath: helper)
-        process.arguments = ["--serve", "--state-dir", dir.path, "--backend", "synthetic", "--credential-binding", String(repeating: "b", count: 64)]
-        process.standardInput = input; process.standardOutput = output; process.standardError = FileHandle.nullDevice
+        process.arguments = ["--migrate-recovery", "--state-dir", dir.path]
+        process.standardOutput = output; process.standardError = FileHandle.nullDevice
         try process.run()
-        let request: JSON = .object(["op": .string("commit_create"), "arguments": .object(["preview": original])])
-        try input.fileHandleForWriting.write(contentsOf: try request.data() + Data([10])); try input.fileHandleForWriting.close()
         let response = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
-        XCTAssertEqual(process.terminationStatus, 0); XCTAssertEqual(try JSON.parse(response)["result"], expected)
+        XCTAssertEqual(process.terminationStatus, 1); XCTAssertEqual(try JSON.parse(response)["error"]["code"], .string("state_version"))
         let state = try store(dir)
-        XCTAssertEqual(try state.metadata("recovery_storage_version"), "6"); XCTAssertEqual(try state.rows("SELECT rowid,* FROM executions"), retained)
+        XCTAssertEqual(try state.metadata("recovery_storage_version"), "7"); XCTAssertEqual(try state.rows("SELECT rowid,* FROM executions"), retained)
         XCTAssertEqual(try state.rows("SELECT rowid,* FROM reconciliation_claims"), claims); try state.verifyAudit()
     }
 

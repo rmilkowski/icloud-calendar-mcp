@@ -45,6 +45,13 @@ class ReconciliationTests(unittest.TestCase):
         current = Protocol(AssessmentBroker()); old = Protocol(CivilBroker())
         self.assertEqual(len(current.tools), 22); self.assertEqual(len(old.tools), 19)
         self.assertEqual([tool for tool in current.tools if tool["name"] not in RECONCILIATION_TOOL_NAMES], old.tools)
+        for floor in (6, 7):
+            broker = AssessmentBroker()
+            broker.recovery_capabilities = lambda floor=floor: {**RECOVERY_CAPABILITIES, "storage_version": floor}
+            upgraded = Protocol(broker)
+            self.assertTrue(upgraded.reconciliation)
+            self.assertTrue(upgraded.all_day_dates)
+            self.assertEqual(upgraded.tools, current.tools)
         for key, value in RECONCILIATION_CAPABILITIES.items():
             bad = deepcopy(RECONCILIATION_CAPABILITIES)
             if type(value) is bool: bad[key] = int(value)
@@ -54,7 +61,7 @@ class ReconciliationTests(unittest.TestCase):
             self.assertFalse(valid_reconciliation_capabilities(bad))
             broker = AssessmentBroker(); broker.reconciliation_capabilities = lambda: bad
             self.assertFalse(Protocol(broker).reconciliation)
-        for floor in (2, 3, 4, 5, 7, True, 6.0):
+        for floor in (2, 3, 4, 5, 8, True, 6.0):
             broker = AssessmentBroker(); broker.recovery_capabilities = lambda: {**RECOVERY_CAPABILITIES, "storage_version": floor}
             broker.reconciliation_capabilities = lambda: self.fail("Unrecognized floor must not probe assessment")
             self.assertFalse(Protocol(broker).reconciliation)
@@ -81,7 +88,9 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_complete_twenty_two_tool_http_stdio_and_preview_round_trip(self):
         with tempfile.TemporaryDirectory(prefix="calendar journal transport ") as directory:
-            state = initialize(Path(directory) / "state"); broker = AssessmentBroker(); protocol = Protocol(broker)
+            state = initialize(Path(directory) / "state"); broker = AssessmentBroker()
+            broker.recovery_capabilities = lambda: {**RECOVERY_CAPABILITIES, "storage_version": 7}
+            protocol = Protocol(broker)
             server = GatewayServer(0, read_token(state), protocol, state_directory=state)
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}, daemon=True); thread.start()
             try:

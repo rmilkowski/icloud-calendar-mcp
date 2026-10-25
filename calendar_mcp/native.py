@@ -69,7 +69,7 @@ def valid_recovery_capabilities(value):
     """Local UI availability is optional; the remote recovery contract is exact."""
     return (isinstance(value, dict) and set(value) == set(RECOVERY_CAPABILITIES)
             and all(type(value[key]) is type(expected)
-                    and (key == "local_ui" or (value[key] in (2, 3, 4, 5, 6) if key == "storage_version" else value[key] == expected))
+                    and (key == "local_ui" or (value[key] in (2, 3, 4, 5, 6, 7) if key == "storage_version" else value[key] == expected))
                     for key, expected in RECOVERY_CAPABILITIES.items()))
 
 

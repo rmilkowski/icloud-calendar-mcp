@@ -61,10 +61,10 @@ class Protocol:
                        if self.future_modification and capabilities["storage_version"] >= 5 else None)
         self.future_termination = valid_future_termination_capabilities(termination)
         civil = (getattr(broker, "all_day_dates_capabilities", lambda: None)()
-                 if self.recovery and capabilities["storage_version"] == 6 and self.alerts else None)
+                 if self.recovery and capabilities["storage_version"] >= 6 and self.alerts else None)
         self.all_day_dates = valid_all_day_dates_capabilities(civil)
         assessment = (getattr(broker, "reconciliation_capabilities", lambda: None)()
-                      if self.recovery and capabilities["storage_version"] == 6 else None)
+                      if self.recovery and capabilities["storage_version"] >= 6 else None)
         self.reconciliation = valid_reconciliation_capabilities(assessment)
         self.tools = [item for item in tools_for_capabilities(alerts=self.alerts, recurrence=self.recurrence,
                                                            series_modification=self.series_modification,

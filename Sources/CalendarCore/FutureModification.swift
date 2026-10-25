@@ -107,8 +107,10 @@ extension Broker {
         _ = try FuturePattern.boundary(selected, now: now())
         let sequence = try state.claim(nonce: nonce, payload: envelope, now: current)
         let result: JSON
+        var verificationStage: WriteFailureStage = .providerMutation
         do {
-            let saved = try backend.applyFutureFields(selected: selected, originalAnchor: anchor, fields: fields, changedFields: mask, restoredAlarms: alarms, boundaryNow: now)
+            let saved = try providerMutation { try backend.applyFutureFields(selected: selected, originalAnchor: anchor, fields: fields, changedFields: mask, restoredAlarms: alarms, boundaryNow: now) }
+            verificationStage = .resultVerification
             try verifyFutureResult(saved, selected: selected, anchor: anchor, fields: fields, mask: mask, restoredAlarms: alarms)
             try state.rebindEvent(id: id, to: saved.boundary)
             var response: [String: JSON] = ["nonce": .string(nonce), "state": .string("applied"), "action": .string("modify"), "event": try view(saved.boundary), "audit_sequence": .int(sequence)]
@@ -116,10 +118,9 @@ extension Broker {
             if rollback { response["rollback_of"] = envelope["rollback"]["source_change_ids"]; response["event_id"] = before["id"] }
             result = .object(response)
         } catch {
-            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string("modify"), "audit_sequence": .int(sequence), "message": .string("Future write may have happened; do not retry. Inspect the original nonce and reconcile before related changes")])
-            try? state.finish(nonce: nonce, state: "unknown", result: unknown, event: "write_unknown"); return unknown
+            return writeFailure(error, nonce: nonce, action: "modify", sequence: sequence, stage: verificationStage)
         }
         do { try state.finish(nonce: nonce, state: "applied", result: result, event: "write_applied"); return result }
-        catch { return .object(["nonce": .string(nonce), "state": .string("unknown"), "message": .string("Future provider returned but durable outcome recording failed; inspect original nonce status")]) }
+        catch { return unknownWrite(error, nonce: nonce, action: "modify", sequence: sequence, stage: .outcomePersistence) }
     }
 }

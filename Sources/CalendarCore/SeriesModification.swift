@@ -115,8 +115,10 @@ extension Broker {
         if let alarms { try validateRestorableAlarms(alarms) }
         let sequence = try state.claim(nonce: nonce, payload: envelope, now: current)
         let result: JSON
+        var verificationStage: WriteFailureStage = .providerMutation
         do {
-            let saved = try backend.applySeriesFields(anchor: anchor, fields: fields, changedFields: mask, restoredAlarms: alarms)
+            let saved = try providerMutation { try backend.applySeriesFields(anchor: anchor, fields: fields, changedFields: mask, restoredAlarms: alarms) }
+            verificationStage = .resultVerification
             let verified = try backend.firstSeriesOccurrence(for: saved)
             try verifySeriesResult(verified, anchor: anchor, fields: fields, mask: mask, restoredAlarms: alarms)
             try state.rebindEvent(id: before["id"].string!, to: verified)
@@ -124,10 +126,9 @@ extension Broker {
             if rollback { response["rollback_of"] = envelope["rollback"]["source_change_ids"]; response["event_id"] = before["id"] }
             result = .object(response)
         } catch {
-            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string("modify"), "audit_sequence": .int(sequence), "message": .string("Series write may have happened; do not retry. Inspect the original nonce and reconcile before related changes")])
-            try? state.finish(nonce: nonce, state: "unknown", result: unknown, event: "write_unknown"); return unknown
+            return writeFailure(error, nonce: nonce, action: "modify", sequence: sequence, stage: verificationStage)
         }
         do { try state.finish(nonce: nonce, state: "applied", result: result, event: "write_applied"); return result }
-        catch { return .object(["nonce": .string(nonce), "state": .string("unknown"), "message": .string("Series provider returned but durable outcome recording failed; inspect original nonce status")]) }
+        catch { return unknownWrite(error, nonce: nonce, action: "modify", sequence: sequence, stage: .outcomePersistence) }
     }
 }

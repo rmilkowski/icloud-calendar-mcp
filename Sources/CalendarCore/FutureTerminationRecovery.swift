@@ -75,9 +75,11 @@ extension Broker {
         let claimedAt = try terminationFreshTime(envelope, restore: true)
         let sequence = try state.claim(nonce: nonce, payload: envelope, now: claimedAt)
         let result: JSON
+        var verificationStage: WriteFailureStage = .providerMutation
         do {
             let prefix = verified.past == .null ? nil : try recordFromSnapshot(verified.past)
-            let saved = try backend.restoreFutureTail(calendarID: verified.selected.calendarNativeID, originalSelected: verified.selected, expectedPrefix: prefix, fields: verified.fields, details: envelope["rollback"]["restoration"]["details"], availability: verified.selected.availability)
+            let saved = try providerMutation { try backend.restoreFutureTail(calendarID: verified.selected.calendarNativeID, originalSelected: verified.selected, expectedPrefix: prefix, fields: verified.fields, details: envelope["rollback"]["restoration"]["details"], availability: verified.selected.availability) }
+            verificationStage = .resultVerification
             let first = try backend.firstSeriesOccurrence(for: saved)
             guard saved == first, saved.nativeID != verified.selected.nativeID, saved.calendarNativeID == verified.selected.calendarNativeID,
                   saved.occurrence == envelope["future"]["boundary"].string, saved.recurring, !saved.detached,
@@ -85,8 +87,10 @@ extension Broker {
                   !saved.hasAttendees, !saved.hasOrganizer,
                   verified.fields.recurrence?.matches(raw: saved.details["recurrence_rules"]) == true,
                   EventSnapshot.detailsEquivalent(recoveryDetails(saved.details), envelope["rollback"]["restoration"]["details"]) else { throw CoreError("verification_failed", "The independent copied series differs from the exact retained creation") }
+            verificationStage = .boundaryAbsence
             try requireAbsent(verified.selected)
             if verified.past != .null {
+                verificationStage = .prefixVerification
                 guard EventSnapshot.equivalent(try view(retainedPrefixMaster(verified.past)), verified.past) else { throw CoreError("verification_failed", "The original prefix changed during independent-copy creation") }
             }
             guard try state.rows("SELECT id FROM identities WHERE kind='event' AND native_id=? AND calendar_id=? AND occurrence=?", [saved.nativeID, saved.calendarNativeID, saved.occurrence ?? ""]).isEmpty else { throw CoreError("verification_failed", "Independent creation returned a previously bound event identity") }
@@ -94,10 +98,9 @@ extension Broker {
             guard newView["id"] != envelope["future"]["reference"]["id"], newView["id"] != envelope["future"]["first_anchor"]["id"] else { throw CoreError("verification_failed", "Independent-copy identity aliases an original reference") }
             result = .object(["nonce": .string(nonce), "state": .string("applied"), "action": .string("create"), "event": newView, "past_anchor": verified.past, "restored_from": envelope["rollback"]["source_change_ids"], "rollback_of": envelope["rollback"]["source_change_ids"], "audit_sequence": .int(sequence)])
         } catch {
-            let unknown: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string("create"), "audit_sequence": .int(sequence), "message": .string("Independent-copy creation may have happened; do not retry. Inspect the original nonce and reconcile before related changes")])
-            try? state.finish(nonce: nonce, state: "unknown", result: unknown, event: "write_unknown"); return unknown
+            return writeFailure(error, nonce: nonce, action: "create", sequence: sequence, stage: verificationStage)
         }
         do { try state.finish(nonce: nonce, state: "applied", result: result, event: "write_applied"); return result }
-        catch { return .object(["nonce": .string(nonce), "state": .string("unknown"), "message": .string("Independent-copy creation returned but durable outcome recording failed; inspect original nonce")]) }
+        catch { return unknownWrite(error, nonce: nonce, action: "create", sequence: sequence, stage: .outcomePersistence) }
     }
 }

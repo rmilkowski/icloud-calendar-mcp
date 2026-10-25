@@ -182,7 +182,9 @@ final class LocalRecoveryWindow: NSObject, NSTableViewDataSource, NSTableViewDel
                 if response["result"]["state"] != .string("applied") {
                     let unattempted = captured.dropFirst(index + 1).map { $0["preview"]["envelope"]["rollback"]["source_change_ids"] }
                     show(.object(["attempted_step_outcomes": .array(outcomes), "unattempted_steps": .array(unattempted), "remaining_source_ids": .array(remaining.map(JSON.string))]))
-                    status.stringValue = "Stopped after step \(index + 1): failed or unknown. Applied steps remain applied. Inspect outcomes before preparing another batch."
+                    status.stringValue = response["result"]["state"] == .string("not_applied")
+                        ? "Stopped after step \(index + 1): provider mutation was not entered. Applied steps remain applied. Prepare a fresh review before trying the remaining changes."
+                        : "Stopped after step \(index + 1): failed or unknown. Applied steps remain applied. Inspect outcomes before preparing another batch."
                     steps = []; busy = false; return
                 }
                 let sources = step["preview"]["envelope"]["rollback"]["source_change_ids"].array!.compactMap(\.string)
