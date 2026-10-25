@@ -207,7 +207,9 @@ extension Broker {
             try checkWritable(calendar, event: current); action = "modify"; restoration = .null
         }
         try checkWritable(calendar)
-        let fields = try EventFields(json: desired["fields"]); _ = try fields.dates()
+        let fields = try EventFields(json: desired["fields"])
+        if action == "modify" { _ = try fields.dates(preserving: EventFields(json: before["fields"])) }
+        else { _ = try fields.dates() }
         if validateAlarmRestoration { try validateRestorableAlarms(recoveryDetails(desired["details"])["alarms"]) }
         let issued = now(), expiry = try sources.map { try parseDate($0[5]) }.min()!
         guard expiry > issued else { throw CoreError("rollback_ineligible", "A selected source has expired") }

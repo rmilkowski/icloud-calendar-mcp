@@ -126,7 +126,7 @@ final class SeriesModificationTests: XCTestCase {
     }
 
     func testExistingEligibilityGuardsAndStructuredLocationApplyToFirstAnchor() throws {
-        for scenario in ["meeting", "organizer", "external_alarm", "cancelled", "nil_all_day", "read_only", "structured_location"] {
+        for scenario in ["meeting", "organizer", "external_alarm", "cancelled", "read_only", "structured_location"] {
             let state = try store(), base = try fixture(), broker = Broker(state: state, backend: base), id = events(broker)[1]["id"]
             var patch: [String: JSON] = ["title": .string("Blocked default")]
             switch scenario {
@@ -134,7 +134,6 @@ final class SeriesModificationTests: XCTestCase {
             case "organizer": base.events[0].hasOrganizer = true
             case "external_alarm": var details = base.events[0].details.object!; details["unsupported_external_alarm"] = .bool(true); base.events[0].details = .object(details)
             case "cancelled": base.events[0].status = "cancelled"
-            case "nil_all_day": base.events[0].fields.allDay = true; base.events[0].fields.timeZone = nil
             case "read_only": base.calendarRecords = [CalendarRecord(nativeID: "synthetic-calendar", title: "Synthetic Calendar", source: "Synthetic", writable: false)]
             default: var details = base.events[0].details.object!; details["structured_location"] = .object(["title": .string("Fixture place"), "radius": .string("0.0")]); base.events[0].details = .object(details); patch = ["location": .string("Replacement")]
             }

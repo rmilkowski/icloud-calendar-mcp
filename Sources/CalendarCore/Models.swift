@@ -59,7 +59,7 @@ public struct EventFields: Equatable, Sendable {
               a.values["time_zone"] == .null || a.values["time_zone"]?.string != nil else { throw CoreError("invalid_arguments", "Invalid event fields") }
         self.init(title: title, start: try a.string("start"), end: try a.string("end"), timeZone: a.values["time_zone"]?.string, allDay: allDay, location: location, notes: notes, alerts: try a.values["alerts"].map(EventAlert.parse), recurrence: try a.values["recurrence"].map(EventRecurrence.init(json:)))
     }
-    public func dates() throws -> (Date, Date, TimeZone?) {
+    private func validatedInstants() throws -> (Date, Date, TimeZone?) {
         let zone = timeZone.flatMap(TimeZone.init(identifier:))
         guard timeZone == nil || zone != nil else { throw CoreError("invalid_timezone", "Invalid IANA timezone") }
         let a = try parseDate(start), b = try parseDate(end)
@@ -83,15 +83,29 @@ public struct EventFields: Equatable, Sendable {
                     throw CoreError("invalid_date", "Timestamp UTC offset disagrees with the event timezone")
                 }
             }
-            if allDay {
-                var c = Calendar(identifier: .gregorian); c.timeZone = zone
-                guard c.startOfDay(for: a) == a, c.startOfDay(for: b) == b else { throw CoreError("invalid_fields", "All-day endpoints must be local midnight; end is exclusive") }
-            }
+        }
+        return (a, b, zone)
+    }
+    public func dates() throws -> (Date, Date, TimeZone?) {
+        let (a, b, zone) = try validatedInstants()
+        if allDay, let zone {
+            var c = Calendar(identifier: .gregorian); c.timeZone = zone
+            guard c.startOfDay(for: a) == a, c.startOfDay(for: b) == b else { throw CoreError("invalid_fields", "All-day endpoints must be local midnight; end is exclusive") }
         } else if allDay {
             throw CoreError("unsupported_timezone", "Editing all-day events with a nil timezone is unsupported")
         }
         try recurrence?.validate(start: a, zone: zone)
         return (a, b, zone)
+    }
+    /// A floating all-day snapshot can be edited only while its opaque temporal
+    /// fields remain exact. No timezone or civil-midnight interpretation is added.
+    public func dates(preserving existing: EventFields) throws -> (Date, Date, TimeZone?) {
+        guard existing.allDay, existing.timeZone == nil else { return try dates() }
+        guard allDay == existing.allDay, timeZone == existing.timeZone,
+              start == existing.start, end == existing.end, recurrence == nil else {
+            throw CoreError("unsupported_timezone", "Nil-timezone all-day edits must preserve exact start, end, timezone and all-day state")
+        }
+        return try validatedInstants()
     }
     public func normalized() throws -> EventFields {
         let (a, b, _) = try dates()
@@ -107,7 +121,12 @@ public struct EventFields: Equatable, Sendable {
         if let existing, existing.timeZone == nil, values["time_zone"] != .null {
             throw CoreError("unsupported_timezone", "Existing nil timezone semantics must be preserved")
         }
-        return try EventFields(json: .object(values)).normalized()
+        let fields = try EventFields(json: .object(values))
+        if let existing, existing.allDay, existing.timeZone == nil {
+            _ = try fields.dates(preserving: existing)
+            return fields
+        }
+        return try fields.normalized()
     }
 }
 

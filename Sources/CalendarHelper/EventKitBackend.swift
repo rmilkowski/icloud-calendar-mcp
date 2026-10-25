@@ -183,7 +183,7 @@ final class EventKitBackend: CalendarBackend {
         if action == "delete" { try store.remove(e, span: .thisEvent, commit: true); return nil }
         guard let fields else { throw CoreError("invalid_fields", "Missing write fields") }
         guard existing == nil || fields.recurrence == nil else { throw CoreError("unsupported_scope", "Recurrence changes require unsupported series editing") }
-        let (start, end, zone) = try fields.dates()
+        let (start, end, zone) = try existing.map { try fields.dates(preserving: $0.fields) } ?? fields.dates()
         if existing == nil || existing?.fields.title != fields.title { e.title = fields.title }
         if existing == nil || existing?.fields.timeZone != fields.timeZone { e.timeZone = zone }
         if existing == nil || existing?.fields.allDay != fields.allDay { e.isAllDay = fields.allDay }

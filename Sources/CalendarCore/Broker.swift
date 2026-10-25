@@ -140,8 +140,6 @@ public final class Broker: @unchecked Sendable {
             guard event.details["unsupported_external_alarm"].boolean != true else { throw CoreError("unsupported_alarm", "Events with email or procedure alarms cannot be mutated") }
             guard !(event.recurring || event.detached) || event.occurrence != nil else { throw CoreError("ambiguous_occurrence", "Recurring event needs a unique occurrence") }
             guard event.status != "cancelled" else { throw CoreError("unsupported_event", "Cancelled events cannot be mutated") }
-            // Validate preserved nil zones conservatively; no machine-zone substitution.
-            if event.fields.allDay && event.fields.timeZone == nil { throw CoreError("unsupported_timezone", "Nil-timezone all-day mutations are unsupported") }
         }
     }
     private func preflight(_ arguments: JSON) throws -> JSON {
@@ -243,7 +241,8 @@ public final class Broker: @unchecked Sendable {
         let fields = envelope["after"] == .null ? nil : try EventFields(json: envelope["after"])
         guard (action == "delete") == (fields == nil) else { throw CoreError("invalid_preview", "Action and after state disagree") }
         if let fields {
-            _ = try fields.dates()
+            if let existing { _ = try fields.dates(preserving: existing.fields) }
+            else { _ = try fields.dates() }
             if let recurrence = fields.recurrence { guard envelope["after"]["recurrence"] == recurrence.json else { throw CoreError("invalid_preview", "Recurrence intent must be canonical") } }
             if fields.alerts != nil, let existing { try validateRestorableAlarms(recoveryDetails(existing.details)["alarms"]) }
         }
