@@ -52,6 +52,14 @@ class ReconciliationTests(unittest.TestCase):
             self.assertTrue(upgraded.reconciliation)
             self.assertTrue(upgraded.all_day_dates)
             self.assertEqual(upgraded.tools, current.tools)
+            guidance = upgraded.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {}}})["result"]["instructions"]
+            if floor == 7:
+                self.assertIn("provider_mutation:not_entered", guidance)
+                self.assertIn("refresh the calendar plugin tool definitions", guidance)
+                self.assertIn("can hold the entire calendar", guidance)
+            else:
+                self.assertNotIn("provider_mutation:not_entered", guidance)
         for key, value in RECONCILIATION_CAPABILITIES.items():
             bad = deepcopy(RECONCILIATION_CAPABILITIES)
             if type(value) is bool: bad[key] = int(value)

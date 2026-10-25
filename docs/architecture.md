@@ -686,6 +686,8 @@ Checked 23 October 2026: [Custom MCP servers](https://developers.openai.com/api/
 
 ## Plugin journal assessment
 
+Source guidance update, pending deployment: an unresolved-write conflict names `list_unresolved_changes`, `get_stored_change`/original-change `get_change_status`, followed by explicit evidence-based user assessment through `preflight_reconciliation` and exact-preview `commit_reconciliation` under normal host confirmation. It explains that uncertain future operations can hold the entire calendar and asks for a plugin tool-definition refresh when journal tools are missing. It never infers an outcome, approves an assessment, requests Terminal reconciliation or retries Calendar data. Initialization adds the native `not_applied` versus unknown distinction only for a verified actual recovery floor >=7; old floor-6 initialization text and all 22 tool schemas remain unchanged. No conflict scopes, codes, stored markers, capability objects or journal behavior change.
+
 The separate journal-only feature adds `list_unresolved_changes`, `preflight_reconciliation` and `commit_reconciliation`, independently gated on the exact `reconciliation_capabilities` version-1 object and recognized actual recovery floor 6. The reviewed combined deployment publishes all 22 tools; the latest deployment and assessment evidence is recorded above. Existing nineteen tool contracts, Calendar preview versions 1–7 and capability minima remain unchanged. This is a user assessment of an earlier unknown outcome, not provider verification or evidence of a fresh human confirmation. No automatic outcome recheck engine is added.
 
 ```mermaid

@@ -230,7 +230,7 @@ extension StateStore {
         for row in unresolved {
             let boundary = try storedConflictScope(nonce: row[0], marker: JSON.parse(Data(row[1].utf8)))
             guard try provenDisjoint(candidate, from: boundary) else {
-                throw CoreError("unresolved_write", "An earlier unresolved outcome may affect this event or recurring group; inspect and reconcile locally")
+                throw CoreError("unresolved_write", "An earlier unresolved outcome may affect this event or recurring group. An uncertain future operation can hold the entire calendar. Do not retry the Calendar change. Use list_unresolved_changes and get_stored_change, or get_change_status with the original change ID, to inspect the recorded outcome. Obtain the user’s explicit applied/not_applied assessment and evidence before preflight_reconciliation, then submit its exact reviewed preview through commit_reconciliation under normal host write confirmation. This is journal-only user assessment, not provider verification; never approve or infer the assessment automatically. If these tools are missing, refresh the calendar plugin tool definitions.")
             }
         }
     }

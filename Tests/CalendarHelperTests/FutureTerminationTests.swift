@@ -206,7 +206,17 @@ final class FutureTerminationTests: XCTestCase {
             }
             XCTAssertEqual(unknown["result"]["state"], .string("unknown"), mode); XCTAssertEqual(commit(broker, retryPreview, restore: restore), unknown)
             let p = call(broker, "preflight_change", ["action": .string("modify"), "scope": .string("this"), "event_id": events.last!["id"], "fields": .object(["notes": .string("Blocked")])])["result"]["preview"]
-            XCTAssertEqual(call(broker, "commit_modify", ["preview": p])["error"]["code"], .string("unresolved_write")); XCTAssertEqual(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0], "1")
+            let blocked = call(broker, "commit_modify", ["preview": p])
+            XCTAssertEqual(blocked["error"]["code"], .string("unresolved_write")); XCTAssertEqual(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0], "1")
+            if mode == "throw" {
+                let message = try XCTUnwrap(blocked["error"]["message"].string)
+                for tool in ["list_unresolved_changes", "get_stored_change", "get_change_status", "preflight_reconciliation", "commit_reconciliation"] { XCTAssertTrue(message.contains(tool)) }
+                XCTAssertTrue(message.contains("can hold the entire calendar")); XCTAssertTrue(message.contains("refresh the calendar plugin tool definitions"))
+                XCTAssertFalse(message.contains("reconcile locally"))
+                XCTAssertEqual(call(broker, "list_unresolved_changes")["result"]["changes"].array?.count, 1)
+                XCTAssertEqual(call(broker, "get_change_status", ["nonce": unknown["result"]["nonce"]])["result"]["state"], .string("unknown"))
+                XCTAssertEqual(call(broker, "reconciliation_capabilities")["result"]["user_assessment"], .bool(true))
+            }
         }
     }
     func testSharedOpaqueReferenceCannotProduceConflictingSnapshotsAndCommitRechecksSelection() throws {
