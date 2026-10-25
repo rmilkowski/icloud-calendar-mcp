@@ -165,6 +165,34 @@ SERIES_ROLLBACK_ENVELOPE = {**SERIES_ENVELOPE, "properties": {**SERIES_ENVELOPE[
 SERIES_ROLLBACK_PREVIEW = obj({"envelope": SERIES_ROLLBACK_ENVELOPE,
                               "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
 
+FUTURE_LIMITATIONS = [
+    "Applies changed default fields to the selected future occurrence and later occurrences in its current provider pattern. Earlier occurrence fields and times are outside the requested change; earlier split segments are not merged.",
+    "EventKit may split the pattern and change provider identities and recurrence end metadata. Detached overrides and exclusions remain provider-controlled. The operation does not enumerate or verify every occurrence or guarantee propagation to detached overrides.",
+    "Recovery reapplies only retained prior default fields to the same verified future segment while its original boundary is still in the future. It does not merge split segments or reconstruct recurrence topology, detached overrides, exclusions or provider identities; recovery may become unavailable before retained details expire.",
+    "One future operation can affect an unbounded number of occurrences and consumes one modify intent under the installation-wide safety limits."]
+FUTURE_LIMITATION_SCHEMA = {"type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": True,
+                            "items": string(2000, enum=FUTURE_LIMITATIONS)}
+FUTURE_REFERENCE = obj({"provider_scope": string(enum=["selected_occurrence_and_future"]),
+                        "boundary": STAMP, "first_anchor": EVENT,
+                        "changed_fields": deepcopy(SERIES_REFERENCE["properties"]["changed_fields"])},
+                       ("provider_scope", "boundary", "first_anchor", "changed_fields"))
+FUTURE_RECOVERY = obj({"mode": string(enum=["future_default_fields"]),
+                       "limitations": FUTURE_LIMITATION_SCHEMA}, ("mode", "limitations"))
+FUTURE_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
+    "version": {"type": "integer", "enum": [5]}, "action": string(enum=["modify"]),
+    "scope": string(enum=["future"]), "before": EVENT, "after": SERIES_AFTER,
+    "future": FUTURE_REFERENCE, "recovery": FUTURE_RECOVERY},
+    "required": [*ENVELOPE["required"], "future", "recovery"]}
+FUTURE_PREVIEW = obj({"envelope": FUTURE_ENVELOPE, "authentication_tag": string(256, minLength=1)},
+                     ("envelope", "authentication_tag"))
+FUTURE_ROLLBACK = {**SERIES_ROLLBACK, "properties": {**SERIES_ROLLBACK["properties"],
+    "limitations": FUTURE_LIMITATION_SCHEMA}}
+FUTURE_ROLLBACK_ENVELOPE = {**FUTURE_ENVELOPE, "properties": {**FUTURE_ENVELOPE["properties"],
+    "after": SNAPSHOT_FIELDS, "rollback": FUTURE_ROLLBACK},
+    "required": [*FUTURE_ENVELOPE["required"], "rollback"]}
+FUTURE_ROLLBACK_PREVIEW = obj({"envelope": FUTURE_ROLLBACK_ENVELOPE,
+                              "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+
 
 def tool(name, description, schema, *, write=False, destructive=False):
     return {"name": name, "description": description, "inputSchema": schema,
@@ -239,8 +267,26 @@ SERIES_MODIFICATION_TOOLS.extend([
          obj({"preview": SERIES_ROLLBACK_PREVIEW}, ("preview",)), write=True, destructive=True)])
 
 
-def tools_for_capabilities(*, alerts, recurrence=False, series_modification=False):
-    return (SERIES_MODIFICATION_TOOLS if series_modification and recurrence and alerts else
+FUTURE_MODIFICATION_TOOLS = deepcopy(SERIES_MODIFICATION_TOOLS)
+for _tool in FUTURE_MODIFICATION_TOOLS:
+    if _tool["name"] == "preflight_change":
+        _tool["inputSchema"]["properties"]["scope"] = string(enum=["this", "series", "future"])
+        _tool["description"] = _tool["description"].replace(
+            "Date/time, timezone, all-day, recurrence and calendar changes, future scope and series deletion are unsupported.",
+            "Future default-field modification uses action modify, scope future and an exact non-detached selected occurrence strictly after native now, including that occurrence and later instances. Only one supported unbounded or date-ended recurrence rule is accepted; count-ended patterns are unsupported. Date/time, timezone, all-day, recurrence and calendar changes and series deletion are unsupported.")
+        _tool["description"] += " Future previews cap expiry at the selected start and sign split/identity and time-limited inverse-field recovery limitations. Never silently choose a later boundary. Use the returned commit_tool with the complete unchanged preview."
+    elif _tool["name"] == "preflight_rollback":
+        _tool["description"] += " A version-5 future change also requires exactly one original source selected alone. Its original boundary must remain strictly future; inverse fields do not merge split segments. Route its exact step through commit_future_rollback."
+FUTURE_MODIFICATION_TOOLS.extend([
+    tool("commit_future_modify", "Apply only the masked title, notes, plain location or alerts defaults to the selected future occurrence and later instances in its current provider pattern using this complete version-5 native-authenticated preview. The preview shows the full selected before/after state, exact inclusive boundary, original first anchor, field mask and signed split/identity/recovery limitations. The boundary must still be strictly future. EventKit may split the pattern; earlier occurrence fields and times are outside the requested change, and detached overrides/exclusions remain provider-controlled. One operation may affect an unbounded number of occurrences and consumes one modify intent. The preview is the complete execution payload. After uncertain transport results, query get_change_status by its nonce without retrying the write.",
+         obj({"preview": FUTURE_PREVIEW}, ("preview",)), write=True, destructive=True),
+    tool("commit_future_rollback", "Reapply only one original future change's retained prior default fields to its same verified future segment using this complete version-5 native-authenticated inverse-field preview. The original inclusive boundary must still be strictly future. The preview signs the current boundary snapshot, exact field mask, restoration values and future_default_fields limitations. Recovery does not merge split segments or reconstruct recurrence topology, detached overrides, exclusions or provider identities, and can expire before retained details do. This is a new journalled modify intent with stale and safety checks. After uncertain transport results, query get_change_status by its nonce without retrying the write.",
+         obj({"preview": FUTURE_ROLLBACK_PREVIEW}, ("preview",)), write=True, destructive=True)])
+
+
+def tools_for_capabilities(*, alerts, recurrence=False, series_modification=False, future_modification=False):
+    return (FUTURE_MODIFICATION_TOOLS if future_modification and series_modification and recurrence and alerts else
+            SERIES_MODIFICATION_TOOLS if series_modification and recurrence and alerts else
             RECURRENCE_TOOLS if recurrence and alerts else TOOLS if alerts else LEGACY_TOOLS)
 
 
@@ -313,9 +359,10 @@ def validate(value, schema, path="arguments", depth=0):
                 raise ValidationError(path + " requires a recognized IANA time zone") from None
 
 
-def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series_modification=False):
+def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series_modification=False, future_modification=False):
     tools = {item["name"]: item for item in tools_for_capabilities(alerts=alerts, recurrence=recurrence,
-                                                               series_modification=series_modification)}
+                                                               series_modification=series_modification,
+                                                               future_modification=future_modification)}
     if name not in tools:
         raise ValidationError("Unknown tool")
     validate(arguments, tools[name]["inputSchema"])
@@ -325,12 +372,14 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series
         series = arguments["scope"] == "series"
         rule = fields.get("recurrence") if fields else None
         series_edit = series_modification and recurrence and alerts and series and action == "modify"
-        if ((not series_edit and series != (action == "create" and rule is not None))
+        future_edit = future_modification and series_modification and recurrence and alerts and arguments["scope"] == "future" and action == "modify"
+        if ((not series_edit and not future_edit and series != (action == "create" and rule is not None))
+                or (arguments["scope"] == "future" and not future_edit)
                 or (rule is not None and action != "create")):
             raise ValidationError("Only series creation accepts and requires recurrence; modify/delete require scope this")
-        if series_edit and (not fields or set(fields) - set(SERIES_FIELD_NAMES)):
+        if (series_edit or future_edit) and (not fields or set(fields) - set(SERIES_FIELD_NAMES)):
             raise ValidationError("Series modification requires only title, notes, plain location or alerts")
-        if series_edit and "title" in fields and not fields["title"].strip():
+        if (series_edit or future_edit) and "title" in fields and not fields["title"].strip():
             raise ValidationError("Series title must not be blank")
         if rule is not None:
             validate_recurrence(rule)
@@ -350,11 +399,13 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series
                 if key in normalized:
                     raise ValidationError("Alerts must not contain duplicate triggers")
                 normalized.append(key)
-    if (name.startswith("commit_") and name not in ("commit_rollback", "commit_series_rollback")
-            and arguments["preview"]["envelope"]["action"] != ("modify" if name == "commit_series_modify" else name.removeprefix("commit_"))):
+    if (name.startswith("commit_") and name not in ("commit_rollback", "commit_series_rollback", "commit_future_rollback")
+            and arguments["preview"]["envelope"]["action"] != ("modify" if name in ("commit_series_modify", "commit_future_modify") else name.removeprefix("commit_"))):
         raise ValidationError("Preview action does not match commit tool")
     if name in ("commit_series_modify", "commit_series_rollback"):
         validate_series_preview(arguments["preview"]["envelope"], rollback=name == "commit_series_rollback")
+    if name in ("commit_future_modify", "commit_future_rollback"):
+        validate_future_preview(arguments["preview"]["envelope"], rollback=name == "commit_future_rollback")
     if name in ("commit_create", "commit_modify", "commit_delete") and arguments["preview"]["envelope"]["version"] == 3:
         envelope = arguments["preview"]["envelope"]
         action, before, after = envelope["action"], envelope["before"], envelope["after"]
@@ -433,3 +484,44 @@ def validate_series_preview(envelope, *, rollback):
             raise ValidationError("Series title must not be blank")
         if "alerts" not in changed and all(after[field] == before["fields"][field] for field in changed):
             raise ValidationError("Series modification must change at least one default field")
+
+
+def validate_future_preview(envelope, *, rollback):
+    before, after, future = envelope["before"], envelope["after"], envelope["future"]
+    anchor, changed = future["first_anchor"], future["changed_fields"]
+    if changed != sorted(changed) or envelope["recovery"]["limitations"] != FUTURE_LIMITATIONS:
+        raise ValidationError("Future preview requires the exact sorted field mask and recovery limitations")
+    if (not before["recurring"] or before["detached"] or not anchor["recurring"] or anchor["detached"]
+            or before["calendar"] != envelope["calendar"] or anchor["calendar"] != envelope["calendar"]
+            or before["occurrence"] != before["fields"]["start"]
+            or future["boundary"] != before["occurrence"] or anchor["occurrence"] != anchor["fields"]["start"]):
+        raise ValidationError("Future preview requires the exact selected recurring boundary and original calendar")
+    validate(anchor["occurrence"], STAMP)
+    instant = lambda stamp: datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    boundary = instant(future["boundary"])
+    if (instant(anchor["occurrence"]) > boundary or instant(envelope["issued_at"]) >= boundary
+            or instant(envelope["expires_at"]) > boundary
+            or instant(envelope["expires_at"]) <= instant(envelope["issued_at"])):
+        raise ValidationError("Future preview expiry and first anchor must respect its exact future boundary")
+    if before["id"] == anchor["id"] and before != anchor:
+        raise ValidationError("One future reference identity requires the same signed snapshot")
+    if before["details"].get("recurrence_rules") != anchor["details"].get("recurrence_rules"):
+        raise ValidationError("Future selected occurrence and first anchor require the same recurrence rule")
+    for field, value in before["fields"].items():
+        if field not in changed and after[field] != value:
+            raise ValidationError("Future preview changes an unmasked field")
+    if rollback:
+        recovery = envelope["rollback"]
+        if (anchor != before or recovery["limitations"] != FUTURE_LIMITATIONS
+                or (recovery["alarm_restoration"] is not None) != ("alerts" in changed)):
+            raise ValidationError("Future recovery requires the current boundary, exact limitations and masked alarm restoration")
+    else:
+        if ("alerts" in after) != ("alerts" in changed):
+            raise ValidationError("Future alerts must match the exact changed_fields mask")
+        for field in changed:
+            if field != "alerts":
+                validate(after[field], FIELDS["properties"][field])
+        if "title" in changed and not after["title"].strip():
+            raise ValidationError("Future title must not be blank")
+        if "alerts" not in changed and all(after[field] == before["fields"][field] for field in changed):
+            raise ValidationError("Future modification must change at least one default field")

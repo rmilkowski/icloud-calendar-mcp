@@ -25,13 +25,19 @@ SERIES_MODIFICATION_CAPABILITIES = {
     "fields": ["title", "notes", "location", "alerts"], "inverse_field_recovery": True,
     "future_scope": False, "series_delete": False, "structural_changes": False,
     "commit_tools": ["commit_series_modify", "commit_series_rollback"]}
+FUTURE_MODIFICATION_CAPABILITIES = {
+    "version": 1, "storage_version": 4, "preview_version": 5, "future_modify": True,
+    "fields": ["title", "notes", "location", "alerts"], "inverse_field_recovery": True,
+    "boundary": "selected_occurrence_inclusive_strictly_future", "recurrence_ends": ["unbounded", "until"],
+    "series_delete": False, "structural_changes": False,
+    "commit_tools": ["commit_future_modify", "commit_future_rollback"]}
 
 
 def valid_recovery_capabilities(value):
     """Local UI availability is optional; the remote recovery contract is exact."""
     return (isinstance(value, dict) and set(value) == set(RECOVERY_CAPABILITIES)
             and all(type(value[key]) is type(expected)
-                    and (key == "local_ui" or (value[key] in (2, 3) if key == "storage_version" else value[key] == expected))
+                    and (key == "local_ui" or (value[key] in (2, 3, 4) if key == "storage_version" else value[key] == expected))
                     for key, expected in RECOVERY_CAPABILITIES.items()))
 
 
@@ -40,6 +46,13 @@ def valid_series_modification_capabilities(value):
             and all(type(value[key]) is type(expected)
                     for key, expected in SERIES_MODIFICATION_CAPABILITIES.items())
             and all(type(item) is str for key in ("fields", "commit_tools") for item in value[key]))
+
+
+def valid_future_modification_capabilities(value):
+    return (isinstance(value, dict) and value == FUTURE_MODIFICATION_CAPABILITIES
+            and all(type(value[key]) is type(expected)
+                    for key, expected in FUTURE_MODIFICATION_CAPABILITIES.items())
+            and all(type(item) is str for key in ("fields", "recurrence_ends", "commit_tools") for item in value[key]))
 
 
 class NativeError(Exception):
@@ -162,6 +175,19 @@ class NativeBroker:
             if valid_series_modification_capabilities(result):
                 self._series_modification_capabilities = result
         return self._series_modification_capabilities
+
+    def future_modification_capabilities(self):
+        """Probe selected-occurrence forward editing independently from version 4."""
+        if not getattr(self, "_future_modification_capabilities_checked", False):
+            self._future_modification_capabilities_checked = True
+            self._future_modification_capabilities = None
+            try:
+                result = self.call("future_modification_capabilities", {})
+            except (NativeError, ValueError, OSError):
+                return None
+            if valid_future_modification_capabilities(result):
+                self._future_modification_capabilities = result
+        return self._future_modification_capabilities
 
     def _wait_io(self, readers, writers, deadline):
         while True:

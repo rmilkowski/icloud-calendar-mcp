@@ -51,6 +51,12 @@ public enum EventSnapshot {
         return a == b && equivalent(selectedA, selectedB)
     }
 
+    static func futureReferenceEquivalent(_ left: JSON, _ right: JSON) -> Bool {
+        guard var a = left.object, var b = right.object,
+              let anchorA = a.removeValue(forKey: "first_anchor"), let anchorB = b.removeValue(forKey: "first_anchor") else { return false }
+        return a == b && equivalent(anchorA, anchorB)
+    }
+
     private static func comparisonRollback(_ value: JSON) throws -> JSON {
         guard var rollback = value.object else { throw CoreError("invalid_snapshot", "Rollback metadata must be an object") }
         if let alarms = rollback["alarm_restoration"], alarms != .null { rollback["alarm_restoration"] = try canonicalAlarms(alarms) }

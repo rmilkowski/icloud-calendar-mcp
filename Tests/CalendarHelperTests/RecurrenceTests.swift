@@ -125,7 +125,9 @@ final class RecurrenceTests: XCTestCase {
         let changed = draft(broker, id: id, action: "modify", fields: .object(["title": .string("One occurrence")]))
         XCTAssertEqual(changed["result"]["preview"]["envelope"]["recovery"]["limitations"], .array([.string(Broker.occurrenceRecoveryLimitation)]))
         XCTAssertEqual(commit(broker, changed["result"]["preview"], action: "modify")["result"]["state"], .string("applied")); XCTAssertEqual(backend.events[1], second)
-        for action in ["modify", "delete"] { XCTAssertEqual(draft(broker, id: id, action: action, fields: action == "modify" ? .object(["title": .string("Widen")]) : nil, scope: "future")["error"]["code"], .string("unsupported_scope")) }
+        // Future modification has a separate v5 contract; this count-ended source remains ineligible.
+        XCTAssertNotEqual(draft(broker, id: id, action: "modify", fields: .object(["title": .string("Widen")]), scope: "future")["error"], .null)
+        XCTAssertEqual(draft(broker, id: id, action: "delete", scope: "future")["error"]["code"], .string("unsupported_scope"))
         XCTAssertEqual(draft(broker, id: id, action: "delete", scope: "series")["error"]["code"], .string("unsupported_scope"))
         let series = draft(broker, id: id, action: "modify", fields: .object(["title": .string("Series default")]), scope: "series")["result"]["preview"]
         XCTAssertEqual(series["envelope"]["version"], .int(4))

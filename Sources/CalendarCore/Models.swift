@@ -143,6 +143,7 @@ public struct EventRecord: Equatable {
 }
 
 public protocol CalendarBackend: AnyObject {
+    func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult
     func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord
     func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord
     func calendars() throws -> [CalendarRecord]
@@ -155,6 +156,7 @@ public protocol CalendarBackend: AnyObject {
 }
 
 public extension CalendarBackend {
+    func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult { throw CoreError("unsupported_scope", "Backend cannot modify future pattern defaults") }
     func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord { throw CoreError("unsupported_scope", "Backend cannot establish the current series first occurrence") }
     func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord { throw CoreError("unsupported_scope", "Backend cannot modify current series defaults") }
     func applyRestoringAlarms(calendarID: String, existing: EventRecord, fields: EventFields, alarms: JSON) throws -> EventRecord? {
@@ -206,6 +208,39 @@ public final class SyntheticBackend: CalendarBackend {
         let first = candidates.filter { $0.occurrence == firstDate }
         guard first.count == 1 else { throw CoreError("identity_ambiguous", "Series first occurrence is ambiguous") }
         return first[0]
+    }
+    public func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult {
+        guard try get(nativeID: selected.nativeID, calendarID: selected.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start)) == selected,
+              try firstSeriesOccurrence(for: selected) == originalAnchor else { throw CoreError("stale_event", "Future pattern changed before write") }
+        let boundary = try FuturePattern.validate(selected: selected, anchor: originalAnchor, now: boundaryNow())
+        // The final clock check is immediately before the synthetic provider mutation.
+        _ = try FuturePattern.boundary(selected, now: boundaryNow())
+        writeCount += 1
+        let split = originalAnchor.occurrence != selected.occurrence
+        let tailID = split ? UUID().uuidString : selected.nativeID
+        for index in events.indices where events[index].nativeID == selected.nativeID && events[index].calendarNativeID == selected.calendarNativeID && events[index].recurring && !events[index].detached {
+            guard let occurrence = events[index].occurrence else { continue }
+            if try parseDate(occurrence) < boundary {
+                if split {
+                    var details = events[index].details.object!, rules = details["recurrence_rules"]!.array!, rule = rules[0].object!
+                    rule["end_date"] = .string(iso(boundary.addingTimeInterval(-0.001))); rule["occurrence_count"] = .int(0)
+                    rules[0] = .object(rule); details["recurrence_rules"] = .array(rules); events[index].details = .object(details)
+                }
+                continue
+            }
+            events[index].nativeID = tailID
+            if changedFields.contains("title") { events[index].fields.title = fields.title }
+            if changedFields.contains("notes") { events[index].fields.notes = fields.notes }
+            if changedFields.contains("location") { events[index].fields.location = fields.location }
+            if changedFields.contains("alerts") {
+                var details = events[index].details.object ?? [:]
+                details["alarms"] = restoredAlarms ?? .array((fields.alerts ?? []).map(\.rawAlarm)); events[index].details = .object(details)
+            }
+        }
+        if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-write failure") }
+        let saved = try get(nativeID: tailID, calendarID: selected.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start))
+        let prefix = split ? try get(nativeID: originalAnchor.nativeID, calendarID: originalAnchor.calendarNativeID, occurrence: originalAnchor.occurrence, knownStart: parseDate(originalAnchor.fields.start)) : nil
+        return FutureWriteResult(boundary: saved, pastAnchor: prefix)
     }
     public func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord {
         guard try firstSeriesOccurrence(for: anchor) == anchor else { throw CoreError("stale_event", "Series anchor changed before write") }

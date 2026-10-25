@@ -52,6 +52,40 @@ final class EventKitBackend: CalendarBackend {
     func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord {
         try refresh(); return try record(firstSeriesEvent(for: selected))
     }
+    func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult {
+        try refresh()
+        guard let calendar = store.calendar(withIdentifier: selected.calendarNativeID), self.calendar(calendar).writable else { throw CoreError("read_only", "Calendar is no longer writable") }
+        let event = try resolve(nativeID: selected.nativeID, calendarID: selected.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start))
+        let first = try firstSeriesEvent(for: selected)
+        guard try record(event) == selected, try record(first) == originalAnchor,
+              !event.hasAttendees, event.organizer == nil, !first.hasAttendees, first.organizer == nil else { throw CoreError("stale_event", "Future boundary or first anchor changed immediately before write") }
+        _ = try FuturePattern.validate(selected: selected, anchor: originalAnchor, now: boundaryNow())
+        if changedFields.contains("title"), fields.title != selected.fields.title { event.title = fields.title }
+        if changedFields.contains("notes"), fields.notes != selected.fields.notes { event.notes = fields.notes }
+        if changedFields.contains("location"), fields.location != selected.fields.location { event.location = fields.location }
+        if changedFields.contains("alerts") {
+            if let restoredAlarms { event.alarms = try self.restoredAlarms(restoredAlarms) }
+            else {
+                guard let alerts = fields.alerts else { throw CoreError("invalid_fields", "Missing future alerts") }
+                event.alarms = try alerts.map { alert in
+                    if let at = alert.at { return EKAlarm(absoluteDate: try parseDate(at)) }
+                    return EKAlarm(relativeOffset: Double(alert.relativeMinutes!) * 60)
+                }
+            }
+        }
+        // Only the exact selected instance is saved. EventKit owns any split and
+        // recurrence termination bookkeeping; user structural fields are never set.
+        _ = try FuturePattern.boundary(selected, now: boundaryNow())
+        try store.save(event, span: .futureEvents, commit: true)
+        let saved = try record(event) // Direct-save provenance, before reset.
+        try refresh()
+        let boundary = try record(resolve(nativeID: saved.nativeID, calendarID: saved.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start)))
+        let past: EventRecord?
+        if originalAnchor.occurrence != selected.occurrence {
+            past = try record(resolve(nativeID: originalAnchor.nativeID, calendarID: originalAnchor.calendarNativeID, occurrence: originalAnchor.occurrence, knownStart: parseDate(originalAnchor.fields.start)))
+        } else { past = nil }
+        return FutureWriteResult(boundary: boundary, pastAnchor: past)
+    }
     func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord {
         try refresh()
         guard let calendar = store.calendar(withIdentifier: anchor.calendarNativeID), self.calendar(calendar).writable else { throw CoreError("read_only", "Calendar is no longer writable") }

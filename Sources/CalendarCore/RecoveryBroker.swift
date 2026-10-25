@@ -54,6 +54,10 @@ extension Broker {
         else if held { reason = "dependent_outcome_unresolved" }
         else if !retained { reason = "details_expired" }
         else if let payload = try state.execution(row[0])?.payload, marker["action"] == .string("delete"), payload["before"]["recurring"] == .bool(true) || payload["before"]["detached"] == .bool(true), !hasStandaloneCopyRecoveryContract(payload) { reason = "recurring_deletion_cannot_be_faithfully_restored" }
+        if reason == nil, marker["scope"] == .string("future") {
+            if let execution = try state.execution(row[0]), execution.payload["version"] == .int(5) { reason = futureBoundaryRecoveryProblem(execution) }
+            else { reason = "future_segment_changed" }
+        }
         var value: [String: JSON] = ["change_id": .string(row[0]), "created_at": .string(row[4]), "action": marker["action"], "state": .string(row[2]), "event_id": marker["event_id"], "expires_at": .optional(row[5].isEmpty ? nil : row[5]), "details_expired": .bool(!retained), "retention_hold": .bool(held), "rolled_back_by": .optional(owner), "recovery_eligible": .bool(reason == nil), "recovery_reason": .optional(reason)]
         if retained, let payload = try state.execution(row[0])?.payload, let title = payload["before"]["fields"]["title"].string { value["title"] = .string(String(title.unicodeScalars.prefix(300))); value["title_truncated"] = .bool(title.unicodeScalars.count > 300) }
         if marker["rollback_of"].array != nil { value["rollback_of"] = marker["rollback_of"] }
@@ -220,6 +224,13 @@ extension Broker {
     }
     func preflightRollback(_ arguments: JSON) throws -> JSON {
         let rows = try selectedRows(arguments), selection = UUID().uuidString
+        let futureSources = try rows.filter { try JSON.parse(Data($0[1].utf8))["scope"] == .string("future") }
+        if !futureSources.isEmpty {
+            guard rows.count == 1 else { throw CoreError("invalid_selection", "Select one future change alone; mixed or multiple future recovery is unsupported") }
+            let step = try futureRollbackStep(rows, selectionID: selection)
+            try state.assertNoUnresolvedConflict(payload: step["preview"]["envelope"])
+            return .object(["selection_id": .string(selection), "selected_change_ids": .array(rows.map { .string($0[0]) }), "selected_count": .int(1), "step_count": .int(1), "steps": .array([step]), "atomic": .bool(false), "limitations": .array(Self.futureLimitations.map(JSON.string))])
+        }
         let seriesSources = try rows.filter { try isSeriesExecution($0) }
         if !seriesSources.isEmpty {
             guard rows.count == 1 else { throw CoreError("invalid_selection", "Select one series change alone; mixed or multiple series recovery is unsupported") }
@@ -257,6 +268,7 @@ extension Broker {
         do {
             try state.expireRecoveryDetails(now: now())
             guard let action = preview["envelope"]["action"].string, ["create", "modify"].contains(action) else { throw CoreError("invalid_preview", "Invalid rollback action") }
+            if preview["envelope"]["version"] == .int(5) { return .object(["result": try commitFuture(.object(["preview": preview]), rollback: true)]) }
             if preview["envelope"]["version"] == .int(4) { return .object(["result": try commitSeries(.object(["preview": preview]), rollback: true)]) }
             return .object(["result": try commit(.object(["preview": preview]), action: action, rollback: true)])
         } catch {

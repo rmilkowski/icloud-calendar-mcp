@@ -81,8 +81,14 @@ extension StateStore {
                   scope.calendar == nil || scope.calendar == calendar else {
                 throw CoreError("unresolved_write", "Stored conflict evidence disagrees with its immutable execution")
             }
+            if marker["scope"] == .string("future") {
+                guard !scope.complete, let boundary = marker["future_boundary"].string,
+                      iso(try parseDate(boundary)) == boundary, marker["future_anchor_id"].string != nil else {
+                    throw CoreError("unresolved_write", "Stored future conflict evidence cannot exhaust provider split groups")
+                }
+            }
             let retained = try secret(nonce: nonce, column: "payload_cipher")
-            for id in [marker["event_id"], marker["series_anchor_id"], retained?["before"]["id"] ?? .null, retained?["event_id"] ?? .null, retained?["series"]["selected"]["id"] ?? .null] where id != .null {
+            for id in [marker["event_id"], marker["series_anchor_id"], marker["future_anchor_id"], retained?["future"]["first_anchor"]["id"] ?? .null, retained?["before"]["id"] ?? .null, retained?["event_id"] ?? .null, retained?["series"]["selected"]["id"] ?? .null] where id != .null {
                 guard let id = id.string, scope.eventIDs.contains(id) else { throw CoreError("unresolved_write", "Stored conflict evidence omits an affected identity") }
             }
             for raw in [marker["rollback_of"], retained?["rollback"]["source_change_ids"] ?? .null] where raw != .null {
@@ -130,7 +136,7 @@ extension StateStore {
         scope.cutoff = Int(try rows("SELECT COALESCE(MAX(rowid),0) FROM identities").first![0]) ?? 0
         scope.existingTarget = ["modify", "delete"].contains(payload["action"].string ?? "")
         if let nonce = nonce ?? payload["nonce"].string { scope.nonces.insert(nonce) }
-        for value in [payload["before"]["id"], payload["event_id"], payload["series"]["selected"]["id"]] {
+        for value in [payload["before"]["id"], payload["event_id"], payload["series"]["selected"]["id"], payload["future"]["first_anchor"]["id"]] {
             if let id = value.string { scope.eventIDs.insert(id) }
         }
         // Source closure is authoritative journal history, including every
@@ -157,7 +163,7 @@ extension StateStore {
             scope.groups.formUnion(ancestor.groups); scope.eventIDs.formUnion(ancestor.eventIDs); scope.nonces.formUnion(ancestor.nonces)
             scope.complete = scope.complete && ancestor.complete
             if ancestor.calendar != scope.calendar { scope.calendar = nil; scope.complete = false }
-            for value in [retained?["before"]["id"] ?? .null, retained?["event_id"] ?? .null, retained?["series"]["selected"]["id"] ?? .null, marker["event_id"]] {
+            for value in [retained?["before"]["id"] ?? .null, retained?["event_id"] ?? .null, retained?["series"]["selected"]["id"] ?? .null, marker["event_id"], retained?["future"]["first_anchor"]["id"] ?? .null, marker["future_anchor_id"]] {
                 if let id = value.string { scope.eventIDs.insert(id) }
             }
             var nextPath = path; nextPath.insert(source)
@@ -172,6 +178,17 @@ extension StateStore {
                   bindings[0].calendarID == bindings[1].calendarID, bindings[0].calendarID == scope.calendar else {
                 throw CoreError("invalid_preview", "Series anchor and reference must identify the same native group")
             }
+        }
+        if payload["version"] == .int(5) {
+            let ids = [payload["before"]["id"].string, payload["future"]["first_anchor"]["id"].string].compactMap { $0 }
+            let bindings = try ids.map { try resolve($0, kind: "event") }
+            guard ids.count == 2, bindings[0].nativeID == bindings[1].nativeID,
+                  bindings[0].calendarID == bindings[1].calendarID, bindings[0].calendarID == scope.calendar else {
+                throw CoreError("invalid_preview", "Future boundary and first anchor must identify the same native group")
+            }
+            // A provider split can mint groups the immutable intent cannot know.
+            // Retain this calendar-wide fallback permanently, including after expiry.
+            scope.complete = false
         }
         if scope.existingTarget && (scope.groups.isEmpty || scope.eventIDs.isEmpty) { scope.complete = false }
         return scope

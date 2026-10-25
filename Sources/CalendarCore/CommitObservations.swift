@@ -17,11 +17,11 @@ extension StateStore {
         case "invalid_arguments", "unknown_operation", "request_too_large": return "invalid_request"
         case "invalid_preview", "nonce_conflict", "nonce_replayed": return "invalid_preview"
         case "stale_event", "stale_calendar", "stale_rollback", "event_missing", "calendar_missing", "identity_missing", "identity_ambiguous": return "stale_state"
-        case "preview_expired": return "preview_expired"
+        case "preview_expired", "future_boundary_elapsed": return "preview_expired"
         case "unresolved_write": return "unresolved_write"
         case "write_safety_limit": return "write_safety_limit"
         case "write_safety_configuration", "recovery_configuration", "invalid_configuration": return "configuration"
-        case "unsupported_restore", "unsupported_scope", "unsupported_change", "calendar_read_only", "read_only", "ineligible_event": return "unsupported_change"
+        case "unsupported_recurrence", "unsupported_restore", "unsupported_scope", "unsupported_change", "calendar_read_only", "read_only", "ineligible_event": return "unsupported_change"
         case "audit_unavailable", "audit_corrupt", "state_corrupt": return "audit_unavailable"
         case "native_error": return "native_error"
         default: return "other"
@@ -30,7 +30,9 @@ extension StateStore {
     func recordCommitObservation(replayed: Bool, operation: String, code: String? = nil, now: Date) throws {
         try transaction {
             let kind = replayed ? "replayed" : "rejected"
-            let operation = Self.observationOperations.contains(operation) ? operation : "other_commit"
+            // New dedicated host consent scopes reuse the fixed accounting categories.
+            let category = operation == "commit_future_modify" ? "commit_modify" : operation == "commit_future_rollback" ? "commit_rollback" : operation
+            let operation = Self.observationOperations.contains(category) ? category : "other_commit"
             let reason = replayed ? "recorded_outcome" : observationReason(code ?? "native_error")
             let origin = localNativeReview ? "local_native_ui" : "chatgpt_host_policy"
             let effective = try observationTime(now: now, create: true)!

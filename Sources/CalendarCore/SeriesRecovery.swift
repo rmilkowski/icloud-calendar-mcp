@@ -10,7 +10,7 @@ extension Broker {
     }
     func isSeriesExecution(_ row: [String]) throws -> Bool {
         let marker = try JSON.parse(Data(row[1].utf8))
-        return marker["series_anchor_id"].string != nil || (marker["scope"] == .string("series") && marker["action"] == .string("modify"))
+        return marker["future_anchor_id"].string != nil || marker["scope"] == .string("future") || marker["series_anchor_id"].string != nil || (marker["scope"] == .string("series") && marker["action"] == .string("modify"))
     }
     func rejectSeriesCrossing(_ sources: [[String]]) throws {
         guard let earliest = sources.compactMap({ Int($0[7]) }).min(), !sources.isEmpty else { throw CoreError("invalid_selection", "Missing rollback history") }

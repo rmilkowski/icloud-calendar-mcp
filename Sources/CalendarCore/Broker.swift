@@ -48,6 +48,11 @@ public final class Broker: @unchecked Sendable {
     }
     private func perform(_ op: String, arguments: JSON) throws -> JSON {
         switch op {
+        case "future_modification_capabilities":
+            _ = try Arguments(arguments, allowed: [])
+            return Self.futureModificationCapabilities
+        case "commit_future_modify": return try commitFuture(arguments, rollback: false)
+        case "commit_future_rollback": return try commitFuture(arguments, rollback: true)
         case "series_modification_capabilities":
             _ = try Arguments(arguments, allowed: [])
             return Self.seriesModificationCapabilities
@@ -64,7 +69,7 @@ public final class Broker: @unchecked Sendable {
             return try state.commitObservationStatus()
         case "recovery_capabilities":
             _ = try Arguments(arguments, allowed: [])
-            return .object(["version": .int(1), "storage_version": .int(3), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
+            return .object(["version": .int(1), "storage_version": .int(4), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
         case "list_changes": return try listChanges(arguments)
         case "get_stored_change": return try storedChange(arguments)
         case "preflight_rollback": return try preflightRollback(arguments)
@@ -138,6 +143,7 @@ public final class Broker: @unchecked Sendable {
         let a = try Arguments(arguments, allowed: ["action", "scope", "calendar_id", "event_id", "fields"], required: ["action", "scope"])
         let action = try a.string("action")
         let scope = try a.string("scope")
+        if action == "modify", scope == "future" { return try preflightFuture(arguments) }
         if action == "modify", scope == "series" { return try preflightSeries(arguments) }
         guard ["create", "modify", "delete"].contains(action), scope == "this" || (action == "create" && scope == "series") else { throw CoreError("unsupported_scope", "Create a series or address one individual event or occurrence") }
         let calendar: JSON; let before: JSON; let after: JSON

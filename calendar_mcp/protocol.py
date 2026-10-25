@@ -4,7 +4,8 @@ import json
 
 from .json_values import validate_json
 from .native import (ALERTS_CAPABILITIES, NativeError, RECURRENCE_CAPABILITIES,
-                     valid_recovery_capabilities, valid_series_modification_capabilities)
+                     valid_future_modification_capabilities, valid_recovery_capabilities,
+                     valid_series_modification_capabilities)
 from .schema import RECOVERY_TOOLS, ValidationError, tools_for_capabilities, validate_arguments
 
 VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
@@ -13,6 +14,9 @@ BASE_INSTRUCTIONS = INSTRUCTIONS.split(" Browse integration change history", 1)[
 ALERTS_INSTRUCTIONS = " Multiple display alerts are supported through preflight_change fields.alerts: a complete replacement list of at most 10 objects, each with relative_minutes (elapsed minutes from event start, negative before and positive after) or at (absolute timestamp with UTC offset). Creation defaults to no alerts; omitted alerts preserve existing alarms on modification and [] clears all. Read complete existing alarms in event.details.alarms. Signed version-2 previews include the exact requested replacement; recovery signs complete retained alarm restoration separately."
 RECURRENCE_INSTRUCTIONS = " Create one event with scope this or a recurring series with scope series and fields.recurrence. Supported frequencies are daily, weekly, monthly and yearly; interval defaults to 1, and end is null/unbounded, count (1–1000), or until (explicit-offset timestamp). Weekly days_of_week uses unique integers 1 Sunday through 7 Saturday; the start weekday must be included. Weekly intervals use Monday week boundaries; monthly/yearly rules skip invalid anchor dates. Modify or delete one identified event or occurrence with scope this. Recurrence-rule changes, scope future and whole-series modification/deletion are unsupported. Version-3 ordinary previews sign the complete change and recovery disclosure. Recovering an occurrence modification restores displayed fields while preserving current occurrence/series structure. Recovering a recurring occurrence deletion creates a standalone copy with new provider identity; it does not undo the series exclusion, reattach the occurrence, restore series membership or inherit future series edits. Older recurring deletes lacking this signed recovery contract remain blocked. Calendar container deletion is permanently prohibited."
 SERIES_MODIFICATION_INSTRUCTIONS = " Current recurring pattern default fields may also be modified with action modify, scope series, event_id and a nonempty subset of title, notes, plain location and alerts. Version-4 previews sign the selected reference occurrence, complete first-anchor before/after fields, exact changed_fields and series_default_fields recovery limitations. The provider applies changes from the first occurrence of its current pattern, including past and future occurrences in that pattern. Separate split segments are not merged; detached overrides and exclusions are provider-controlled and are not exhaustively verified. A series edit may affect an unbounded number of occurrences and consumes one modify intent. Date/time, timezone, all-day, recurrence, calendar moves, future scope and series deletion remain unsupported. Recovery selects exactly one series source alone and reapplies only its retained masked prior defaults to the same current pattern; it does not reconstruct provider structure or detached overrides."
+
+
+FUTURE_MODIFICATION_INSTRUCTIONS = " Future default-field modification uses action modify, scope future, an exact opaque non-detached occurrence event_id and a nonempty subset of title, notes, plain location and alerts. It includes the selected occurrence and later instances in that current provider pattern. The exact selected start must be strictly after native now; never silently choose a later boundary. Only one supported unbounded or date-ended recurrence rule is accepted; count-ended and multiple-rule patterns are unsupported. Version-5 previews sign the complete selected before/after fields, original first anchor, exact inclusive boundary, sorted changed_fields and future_default_fields recovery limitations; expiry is capped at the selected start. EventKit may split the pattern and change provider identities/end metadata; earlier occurrence fields and times are outside the requested change. Detached overrides and exclusions remain provider-controlled and are not exhaustively verified. One future operation may affect an unbounded number of occurrences and consumes one modify intent. Submit the complete unchanged ordinary preview through commit_future_modify. Recovery selects exactly one original future source alone and submits the exact returned step through commit_future_rollback while that original boundary is still future; it reapplies retained masked defaults to the same verified segment without merging segments or reconstructing topology/identities. Recovery may become unavailable before retained details expire. Structural series changes and series deletion remain unsupported."
 
 
 def loads(data, *, max_depth=20):
@@ -46,10 +50,14 @@ class Protocol:
         self.recurrence = (self.alerts and isinstance(recurrence, dict) and recurrence == RECURRENCE_CAPABILITIES
                            and all(type(recurrence[key]) is type(value) for key, value in RECURRENCE_CAPABILITIES.items()))
         series = (getattr(broker, "series_modification_capabilities", lambda: None)()
-                  if self.recovery and capabilities["storage_version"] == 3 and self.alerts and self.recurrence else None)
+                  if self.recovery and capabilities["storage_version"] >= 3 and self.alerts and self.recurrence else None)
         self.series_modification = valid_series_modification_capabilities(series)
+        future = (getattr(broker, "future_modification_capabilities", lambda: None)()
+                  if self.series_modification and capabilities["storage_version"] == 4 else None)
+        self.future_modification = valid_future_modification_capabilities(future)
         self.tools = [item for item in tools_for_capabilities(alerts=self.alerts, recurrence=self.recurrence,
-                                                           series_modification=self.series_modification)
+                                                           series_modification=self.series_modification,
+                                                           future_modification=self.future_modification)
                       if self.recovery or item["name"] not in RECOVERY_TOOLS]
 
     def handle(self, request):
@@ -95,6 +103,14 @@ class Protocol:
                     result["instructions"] = result["instructions"].replace(
                         "through commit_rollback.",
                         "using each step's returned commit_tool routing hint: commit_rollback for legacy recovery or commit_series_rollback for version-4 series recovery. Native preview validation remains authoritative.")
+                    if self.future_modification:
+                        result["instructions"] = result["instructions"].replace(
+                            "Recurrence-rule changes, scope future and whole-series deletion are unsupported.",
+                            "Recurrence-rule changes and whole-series deletion are unsupported.")
+                        result["instructions"] = result["instructions"].replace(
+                            "Date/time, timezone, all-day, recurrence, calendar moves, future scope and series deletion remain unsupported.",
+                            "Date/time, timezone, all-day, recurrence, calendar moves and series deletion remain unsupported.")
+                        result["instructions"] += FUTURE_MODIFICATION_INSTRUCTIONS
             else:
                 result["instructions"] += " Recurring creation, recurring occurrence deletion and version-3 previews require a verified recurrence-capable native helper."
         elif method == "ping":
@@ -141,9 +157,19 @@ class Protocol:
                     result = {"content": [{"type": "text", "text": json.dumps({"code": "feature_unavailable",
                                "message": "Series default-field modification requires verified native series, recurrence, alerts and recovery capabilities; no request was dispatched"})}], "isError": True}
                     return {"jsonrpc": "2.0", "id": identifier, "result": result}
+            if not self.future_modification and isinstance(arguments, dict):
+                preview = arguments.get("preview")
+                envelope = preview.get("envelope") if isinstance(preview, dict) else None
+                if (name in ("commit_future_modify", "commit_future_rollback")
+                        or (name == "preflight_change" and arguments.get("scope") == "future")
+                        or (name.startswith("commit_") and isinstance(envelope, dict) and envelope.get("version") == 5)):
+                    result = {"content": [{"type": "text", "text": json.dumps({"code": "feature_unavailable",
+                               "message": "Future default-field modification requires verified native future, series, recurrence, alerts and storage-4 recovery capabilities; no request was dispatched"})}], "isError": True}
+                    return {"jsonrpc": "2.0", "id": identifier, "result": result}
             try:
                 validate_arguments(name, arguments, alerts=self.alerts, recurrence=self.recurrence,
-                                   series_modification=self.series_modification)
+                                   series_modification=self.series_modification,
+                                   future_modification=self.future_modification)
             except ValidationError as exc:
                 return error(identifier, -32602, str(exc))
             try:

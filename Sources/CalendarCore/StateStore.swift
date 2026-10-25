@@ -279,7 +279,7 @@ public final class StateStore {
                   try auditSequence(JSON.parse(Data(row[1].utf8))) == sequence else { throw CoreError("audit_corrupt", "Audit chain verification failed; writes disabled") }
             previous = row[3]
         }
-        if try ["2", "3"].contains(metadata("recovery_storage_version") ?? "") { try verifyLegacyManifest() }
+        if try ["2", "3", "4"].contains(metadata("recovery_storage_version") ?? "") { try verifyLegacyManifest() }
     }
     public func auditRecords() throws -> [JSON] { try rows("SELECT body FROM audit ORDER BY sequence").map { try JSON.parse(Data($0[0].utf8)) } }
 }
