@@ -48,6 +48,9 @@ public final class Broker: @unchecked Sendable {
     }
     private func perform(_ op: String, arguments: JSON) throws -> JSON {
         switch op {
+        case "all_day_dates_capabilities":
+            _ = try Arguments(arguments, allowed: [])
+            return Self.allDayDatesCapabilities
         case "future_termination_capabilities":
             _ = try Arguments(arguments, allowed: [])
             return Self.futureTerminationCapabilities
@@ -74,7 +77,7 @@ public final class Broker: @unchecked Sendable {
             return try state.commitObservationStatus()
         case "recovery_capabilities":
             _ = try Arguments(arguments, allowed: [])
-            return .object(["version": .int(1), "storage_version": .int(5), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
+            return .object(["version": .int(1), "storage_version": .int(6), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
         case "list_changes": return try listChanges(arguments)
         case "get_stored_change": return try storedChange(arguments)
         case "preflight_rollback": return try preflightRollback(arguments)
@@ -146,6 +149,7 @@ public final class Broker: @unchecked Sendable {
         let a = try Arguments(arguments, allowed: ["action", "scope", "calendar_id", "event_id", "fields", "cutoff"], required: ["action", "scope"])
         let action = try a.string("action")
         let scope = try a.string("scope")
+        if a.values["fields"]?.object?["all_day_dates"] != nil || (action == "create" && a.values["fields"]?["all_day"] == .bool(true)) { return try preflightAllDay(arguments) }
         if action == "delete", scope == "future" { return try preflightTermination(arguments) }
         if action == "modify", scope == "future" { return try preflightFuture(arguments) }
         if action == "modify", scope == "series" { return try preflightSeries(arguments) }
@@ -172,6 +176,9 @@ public final class Broker: @unchecked Sendable {
             } else {
                 guard let patch = a.values["fields"] else { throw CoreError("invalid_arguments", "Modify requires fields") }
                 let fields = try EventFields.merged(patch, with: record.fields)
+                if fields.allDay {
+                    guard ["start", "end", "time_zone", "all_day"].allSatisfy({ fields.json[$0] == record.fields.json[$0] }) else { throw CoreError("unsupported_all_day", "All-day structural edits require all_day_dates on one nonrecurring floating all-day event") }
+                }
                 after = fields.json
                 let sameAlerts = try fields.alerts.map { try EventAlert.matches($0, raw: record.details["alarms"] == .null ? .array([]) : record.details["alarms"]) } ?? true
                 guard fields.withoutAlerts != record.fields.withoutAlerts || !sameAlerts else { throw CoreError("no_change", "No event fields changed") }
@@ -195,6 +202,7 @@ public final class Broker: @unchecked Sendable {
         guard let data = Data(base64Encoded: try requiredMetadata("signing_key")), data.count == 32 else { throw CoreError("state_corrupt", "Native signing configuration invalid") }; return SymmetricKey(data: data)
     }
     func commit(_ arguments: JSON, action: String, rollback: Bool = false) throws -> JSON {
+        if arguments["preview"]["envelope"]["version"] == .int(7) { return try commitAllDay(arguments, action: action, rollback: rollback) }
         let a = try Arguments(arguments, allowed: ["preview"], required: ["preview"])
         let p = try Arguments(a.values["preview"]!, allowed: ["envelope", "authentication_tag"], required: ["envelope", "authentication_tag"])
         let envelope = p.values["envelope"]!
@@ -223,6 +231,10 @@ public final class Broker: @unchecked Sendable {
             guard try state.payloadMatches(nonce: nonce, payload: envelope) else { throw CoreError("nonce_conflict", "Nonce payload differs from recorded execution") }
             try state.recordCommitObservation(replayed: true, operation: rollback ? "commit_rollback" : "commit_" + action, now: now())
             return prior.result
+        }
+        if envelope["after"]["all_day"] == .bool(true) {
+            let structural = action == "create" || ["start", "end", "time_zone", "all_day"].contains { envelope["after"][$0] != envelope["before"]["fields"][$0] }
+            guard !structural else { throw CoreError("fresh_preview_required", "All-day structural writes require a fresh civil-date preview") }
         }
         let issued = try parseDate(e.string("issued_at")), expiry = try parseDate(e.string("expires_at")), current = now()
         guard issued <= current.addingTimeInterval(30), expiry > current, expiry > issued, expiry.timeIntervalSince(issued) <= 600.001 else { throw CoreError("preview_expired", "Preview expired or invalid; request a new preflight") }

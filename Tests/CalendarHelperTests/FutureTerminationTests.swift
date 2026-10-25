@@ -338,12 +338,51 @@ final class FutureTerminationTests: XCTestCase {
             history = try Dictionary(uniqueKeysWithValues: tables.map { ($0, try state.rows("SELECT * FROM " + $0 + " ORDER BY rowid")) })
             identityMetadata = try state.rows("SELECT * FROM metadata WHERE key NOT IN ('recovery_storage_version','recovery_clock_highwater') ORDER BY key")
         }
-        do { let state = try StateStore(directory: directory); XCTAssertEqual(try state.metadata("recovery_storage_version"), "5"); for table in tables { XCTAssertEqual(try state.rows("SELECT * FROM " + table + " ORDER BY rowid"), history[table]) }; XCTAssertEqual(try state.rows("SELECT * FROM metadata WHERE key NOT IN ('recovery_storage_version','recovery_clock_highwater') ORDER BY key"), identityMetadata) }
+        do { let state = try StateStore(directory: directory); XCTAssertEqual(try state.metadata("recovery_storage_version"), "6"); for table in tables { XCTAssertEqual(try state.rows("SELECT * FROM " + table + " ORDER BY rowid"), history[table]) }; XCTAssertEqual(try state.rows("SELECT * FROM metadata WHERE key NOT IN ('recovery_storage_version','recovery_clock_highwater') ORDER BY key"), identityMetadata) }
         let frozen = "/private/tmp/calendar-future-v5-freeze-p9j0kpd_/CalendarHelper"
         guard FileManager.default.isExecutableFile(atPath: frozen) else { throw XCTSkip("Frozen v5 floor-four helper unavailable") }
         XCTAssertEqual(digest(try Data(contentsOf: URL(fileURLWithPath: frozen))), "4b7895c799f0be55c6b4052df5e4bfa522e3c396a551ddec77c68c273acaf347")
         let process = Process(), output = Pipe(); process.executableURL = URL(fileURLWithPath: frozen); process.arguments = ["--migrate-recovery", "--state-dir", directory.path]; process.standardOutput = output; process.standardError = FileHandle.nullDevice; try process.run(); process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 1); XCTAssertEqual(try JSON.parse(output.fileHandleForReading.readDataToEndOfFile())["error"]["code"], .string("state_version"))
         let state = try StateStore(directory: directory); for table in tables { XCTAssertEqual(try state.rows("SELECT * FROM " + table + " ORDER BY rowid"), history[table]) }; try state.verifyAudit()
+    }
+    func testAllDayTerminationAndCopyFailBeforeIntentWhileHistoricalNoncesReplay() throws {
+        let state = try state(), base = try fixture(), broker = Broker(state: state, backend: base, now: { self.initialNow })
+        for index in base.events.indices {
+            let start = try parseDate(String(base.events[index].fields.start.prefix(10)) + "T00:00:00Z")
+            base.events[index].fields.start = iso(start); base.events[index].fields.end = iso(start.addingTimeInterval(86400))
+            base.events[index].fields.allDay = true; base.events[index].fields.timeZone = "UTC"; base.events[index].occurrence = iso(start)
+        }
+        let events = views(broker)
+        XCTAssertEqual(draft(broker, events[0]["id"])["error"]["code"], .string("unsupported_restore"))
+        let selected = base.events[2], anchor = base.events[0], before = try broker.view(selected), anchorView = try broker.view(anchor)
+        let resolved = try FutureCutoff(.object(["at": .string(selected.fields.start)]))
+        let rule = try FutureTerminationPattern.copyRecurrence(selected: selected, anchor: anchor, now: initialNow)
+        let future: JSON = .object(["provider_scope": .string("selected_occurrence_and_future"), "cutoff": resolved.json, "resolved_cutoff": .string(iso(resolved.start)), "boundary": .string(selected.fields.start), "reference": anchorView, "first_anchor": anchorView, "selection_window": resolved.window, "removes_entire_current_pattern": .bool(false), "copy_recurrence": rule.json])
+        let deletion = try broker.terminationPreview(action: "delete", calendar: before["calendar"], before: before, after: .null, future: future)["preview"]
+        XCTAssertEqual(commit(broker, deletion)["error"]["code"], .string("unsupported_restore"))
+        XCTAssertEqual(try state.rows("SELECT count(*) FROM executions")[0][0], "0"); XCTAssertEqual(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0], "0")
+        let source = deletion["envelope"], sourceNonce = source["nonce"].string!
+        _ = try state.claim(nonce: sourceNonce, payload: source, now: initialNow)
+        let applied: JSON = .object(["nonce": .string(sourceNonce), "state": .string("applied"), "action": .string("delete"), "deleted_boundary": before, "past_anchor": anchorView])
+        try state.finish(nonce: sourceNonce, state: "applied", result: applied, event: "write_applied")
+        XCTAssertEqual(commit(broker, deletion)["result"], applied)
+        let history = call(broker, "list_changes")["result"]["changes"].array!
+        XCTAssertEqual(history.first?["recovery_reason"], .string("all_day_copy_unsupported"))
+        XCTAssertNotEqual(rollback(broker, .string(sourceNonce))["error"], .null)
+        var fields = selected.fields; fields.recurrence = rule
+        let restoration: JSON = .object(["details": broker.recoveryDetails(selected.details), "availability": .string(selected.availability), "past_anchor": anchorView])
+        let rollback: JSON = .object(["selection_id": .string(UUID().uuidString), "source_change_ids": .array([.string(sourceNonce)]), "source_digest": .string(try broker.sourceDigest(state.recoveryRows())), "restoration": restoration, "limitations": .array(Broker.terminationLimitations.map(JSON.string))])
+        let copy = try broker.terminationPreview(action: "create", calendar: before["calendar"], before: .null, after: fields.json, future: future, rollback: rollback)["preview"]
+        XCTAssertEqual(commit(broker, copy, restore: true)["error"]["code"], .string("unsupported_restore"))
+        XCTAssertEqual(try state.rows("SELECT count(*) FROM executions")[0][0], "1")
+        let copyNonce = copy["envelope"]["nonce"].string!
+        _ = try state.claim(nonce: copyNonce, payload: copy["envelope"], now: initialNow)
+        let unknown: JSON = .object(["nonce": .string(copyNonce), "state": .string("unknown"), "action": .string("create")])
+        try state.finish(nonce: copyNonce, state: "unknown", result: unknown, event: "write_unknown")
+        XCTAssertEqual(commit(broker, copy, restore: true)["result"], unknown)
+        XCTAssertEqual(base.writeCount, 0); XCTAssertEqual(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0], "1")
+        XCTAssertEqual(try state.execution(sourceNonce)?.payload, source)
+        try state.verifyAudit()
     }
 }

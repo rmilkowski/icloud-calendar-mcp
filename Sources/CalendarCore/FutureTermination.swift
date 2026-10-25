@@ -26,6 +26,7 @@ extension Broker {
     }
     func checkTailCopyRestorable(_ record: EventRecord) throws {
         _ = try FutureTerminationPattern.validateRetainedFields(record.fields)
+        guard !record.fields.allDay else { throw CoreError("unsupported_restore", "All-day termination is unsupported because independent-copy recovery lacks a verified civil-date contract") }
         guard record.fields.timeZone != nil, ["free", "busy", "tentative", "unavailable", "unknown"].contains(record.availability) else { throw CoreError("unsupported_restore", "Tail copy needs a supported named timezone and availability") }
         let details = recoveryDetails(record.details)
         if details["url"] != .null { guard let value = details["url"].string, URL(string: value) != nil else { throw CoreError("unsupported_restore", "Invalid retained URL") } }
@@ -124,6 +125,7 @@ extension Broker {
             guard try state.payloadMatches(nonce: nonce, payload: envelope) else { throw CoreError("nonce_conflict", "Nonce payload differs from recorded execution") }
             try state.recordCommitObservation(replayed: true, operation: "commit_future_delete", now: now()); return prior.result
         }
+        guard envelope["before"]["fields"]["all_day"] != .bool(true) else { throw CoreError("unsupported_restore", "All-day future deletion lacks a verified independent-copy recovery contract") }
         _ = try terminationFreshTime(envelope, restore: false)
         try state.assertNoUnresolvedConflict(payload: envelope)
         guard let reference = envelope["future"]["reference"]["id"].string else { throw CoreError("invalid_preview", "Missing selected pattern reference") }

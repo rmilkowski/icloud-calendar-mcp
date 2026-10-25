@@ -39,11 +39,24 @@ FUTURE_TERMINATION_CAPABILITIES = {
     "commit_tools": ["commit_future_delete", "commit_future_restore"]}
 
 
+ALL_DAY_DATES_CAPABILITIES = {
+    "version": 1, "storage_version": 6, "preview_version": 7, "create": True, "modify": True,
+    "scope": "nonrecurring_floating", "date_fields": ["start_date", "end_date_exclusive"],
+    "end_semantics": "exclusive", "inverse_field_recovery": True, "delete": False,
+    "recurring_structural_changes": False, "commit_tools": ["commit_create", "commit_modify", "commit_rollback"]}
+
+
+def valid_all_day_dates_capabilities(value):
+    return (isinstance(value, dict) and value == ALL_DAY_DATES_CAPABILITIES
+            and all(type(value[key]) is type(expected) for key, expected in ALL_DAY_DATES_CAPABILITIES.items())
+            and all(type(item) is str for key in ("date_fields", "commit_tools") for item in value[key]))
+
+
 def valid_recovery_capabilities(value):
     """Local UI availability is optional; the remote recovery contract is exact."""
     return (isinstance(value, dict) and set(value) == set(RECOVERY_CAPABILITIES)
             and all(type(value[key]) is type(expected)
-                    and (key == "local_ui" or (value[key] in (2, 3, 4, 5) if key == "storage_version" else value[key] == expected))
+                    and (key == "local_ui" or (value[key] in (2, 3, 4, 5, 6) if key == "storage_version" else value[key] == expected))
                     for key, expected in RECOVERY_CAPABILITIES.items()))
 
 
@@ -214,6 +227,19 @@ class NativeBroker:
             if valid_future_termination_capabilities(result):
                 self._future_termination_capabilities = result
         return self._future_termination_capabilities
+
+    def all_day_dates_capabilities(self):
+        """Independent metadata-only civil-date contract; no Calendar operation."""
+        if not getattr(self, "_all_day_dates_capabilities_checked", False):
+            self._all_day_dates_capabilities_checked = True
+            self._all_day_dates_capabilities = None
+            try:
+                result = self.call("all_day_dates_capabilities", {})
+            except (NativeError, ValueError, OSError):
+                return None
+            if valid_all_day_dates_capabilities(result):
+                self._all_day_dates_capabilities = result
+        return self._all_day_dates_capabilities
 
     def _wait_io(self, readers, writers, deadline):
         while True:

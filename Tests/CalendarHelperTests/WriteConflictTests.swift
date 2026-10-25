@@ -286,6 +286,6 @@ final class WriteConflictTests: XCTestCase {
         XCTAssertEqual(commit(broker, independent)["result"]["state"], .string("applied"))
         XCTAssertEqual(try state.rows("SELECT e.payload,d.payload_cipher,k.key FROM executions e JOIN execution_details d USING(nonce) JOIN execution_keys k USING(nonce) WHERE nonce=?", [original["envelope"]["nonce"].string!]), immutable)
         XCTAssertTrue(try state.hasUnresolved()); XCTAssertEqual(base.writeCount, 2)
-        XCTAssertEqual(try state.metadata("recovery_storage_version"), "5")
+        XCTAssertEqual(try state.metadata("recovery_storage_version"), "6")
     }
 }

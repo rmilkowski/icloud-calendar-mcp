@@ -106,7 +106,7 @@ final class NilTimezoneAllDayTests: XCTestCase {
         after["end"] = .string("2026-11-01T00:00:00.000Z"); body["after"] = .object(after)
         let envelope = JSON.object(body), key = SymmetricKey(data: Data(base64Encoded: try XCTUnwrap(state.metadata("signing_key")))!)
         let substituted: JSON = .object(["envelope": envelope, "authentication_tag": .string(Data(HMAC<SHA256>.authenticationCode(for: try envelope.data(), using: key)).base64EncodedString())])
-        XCTAssertEqual(call(broker, "commit_modify", ["preview": substituted])["error"]["code"], .string("unsupported_timezone"))
+        XCTAssertEqual(call(broker, "commit_modify", ["preview": substituted])["error"]["code"], .string("fresh_preview_required"))
         XCTAssertEqual(backend.writeCount, 0)
         XCTAssertEqual(try state.rows("SELECT count(*) FROM executions")[0][0], "0")
         XCTAssertEqual(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0], "0")

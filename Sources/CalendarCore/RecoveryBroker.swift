@@ -14,6 +14,7 @@ extension Broker {
         guard (!record.recurring && !record.detached) || (allowStandaloneOccurrence && record.occurrence != nil) else { throw CoreError("unsupported_restore", "Deleting recurring or detached events needs the explicit standalone-copy recovery contract") }
         guard !record.hasAttendees, !record.hasOrganizer, record.status != "cancelled", record.details["unsupported_external_alarm"] != .bool(true), record.details["alarms"] == .null || record.details["alarms"].array != nil else { throw CoreError("unsupported_restore", "Stored meeting, alarm or status data cannot be faithfully restored") }
         _ = try record.fields.normalized()
+        guard !record.fields.allDay else { throw CoreError("unsupported_restore", "All-day deletion is unsupported because legacy copy recovery lacks the verified civil-date contract") }
         guard ["free", "busy", "tentative", "unavailable", "unknown"].contains(record.availability) else { throw CoreError("unsupported_restore", "Unsupported event availability") }
         let details = recoveryDetails(record.details)
         if details["url"] != .null { guard let text = details["url"].string, URL(string: text) != nil else { throw CoreError("unsupported_restore", "Invalid event URL") } }
@@ -53,6 +54,7 @@ extension Broker {
         else if owner != nil { reason = "already_rolled_back" }
         else if held { reason = "dependent_outcome_unresolved" }
         else if !retained { reason = "details_expired" }
+        else if let payload = try state.execution(row[0])?.payload, marker["action"] == .string("delete"), payload["before"]["fields"]["all_day"] == .bool(true) { reason = "all_day_copy_unsupported" }
         else if let payload = try state.execution(row[0])?.payload, marker["action"] == .string("delete"), payload["before"]["recurring"] == .bool(true) || payload["before"]["detached"] == .bool(true), !hasStandaloneCopyRecoveryContract(payload), !hasFutureTerminationRecoveryContract(payload) { reason = "recurring_deletion_cannot_be_faithfully_restored" }
         if reason == nil, marker["scope"] == .string("future") {
             if let execution = try state.execution(row[0]), execution.payload["version"] == .int(5) { reason = futureBoundaryRecoveryProblem(execution) }
@@ -173,6 +175,7 @@ extension Broker {
     }
     func rollbackStep(_ sources: [[String]], selectionID: String, validateAlarmRestoration: Bool = true) throws -> JSON {
         guard let first = sources.first, let last = sources.last, sources.count <= 25 else { throw CoreError("invalid_selection", "Empty rollback group") }
+        guard try sources.allSatisfy({ try !isAllDayExecution($0) }) else { throw CoreError("rollback_all_day_boundary", "Civil-date sources require their dedicated recovery contract") }
         try rejectSeriesCrossing(sources)
         let held = try state.recoveryHeldNonces()
         for row in sources { guard try changeSummary(row, held: held)["recovery_eligible"] == .bool(true) else { throw CoreError("rollback_ineligible", "A selected change is expired, unverified, consumed or unsupported") } }
@@ -208,6 +211,10 @@ extension Broker {
         }
         try checkWritable(calendar)
         let fields = try EventFields(json: desired["fields"])
+        if fields.allDay {
+            let structural = action == "create" || ["start", "end", "time_zone", "all_day"].contains { fields.json[$0] != before["fields"][$0] }
+            guard !structural else { throw CoreError("unsupported_restore", "Legacy all-day structural recovery lacks the civil-date contract; request a supported fresh date preview") }
+        }
         if action == "modify" { _ = try fields.dates(preserving: EventFields(json: before["fields"])) }
         else { _ = try fields.dates() }
         if validateAlarmRestoration { try validateRestorableAlarms(recoveryDetails(desired["details"])["alarms"]) }
@@ -227,6 +234,13 @@ extension Broker {
     }
     func preflightRollback(_ arguments: JSON) throws -> JSON {
         let rows = try selectedRows(arguments), selection = UUID().uuidString
+        let allDaySources = try rows.filter { try isAllDayExecution($0) }
+        if !allDaySources.isEmpty {
+            guard rows.count == 1 else { throw CoreError("invalid_selection", "Select one civil-date source alone; mixed or multiple sources are unsupported") }
+            let step = try allDayRollbackStep(rows, selectionID: selection)
+            try state.assertNoUnresolvedConflict(payload: step["preview"]["envelope"])
+            return .object(["selection_id": .string(selection), "selected_change_ids": .array(rows.map { .string($0[0]) }), "selected_count": .int(1), "step_count": .int(1), "steps": .array([step]), "atomic": .bool(false), "limitations": .array([.string(Self.allDayRecoveryLimitation)])])
+        }
         let futureSources = try rows.filter { try JSON.parse(Data($0[1].utf8))["scope"] == .string("future") }
         if !futureSources.isEmpty {
             guard rows.count == 1 else { throw CoreError("invalid_selection", "Select one future change alone; mixed or multiple future recovery is unsupported") }

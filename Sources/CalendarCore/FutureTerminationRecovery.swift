@@ -64,6 +64,7 @@ extension Broker {
             guard try state.payloadMatches(nonce: nonce, payload: envelope) else { throw CoreError("nonce_conflict", "Nonce payload differs from recorded execution") }
             try state.recordCommitObservation(replayed: true, operation: "commit_future_restore", now: now()); return prior.result
         }
+        guard envelope["after"]["all_day"] != .bool(true) else { throw CoreError("unsupported_restore", "All-day independent-copy recovery is unsupported") }
         _ = try terminationFreshTime(envelope, restore: true)
         try state.assertNoUnresolvedConflict(payload: envelope)
         let verified = try validateTerminationRollback(envelope)

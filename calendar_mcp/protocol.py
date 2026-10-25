@@ -5,7 +5,8 @@ import json
 from .json_values import validate_json
 from .native import (ALERTS_CAPABILITIES, NativeError, RECURRENCE_CAPABILITIES,
                      valid_future_modification_capabilities, valid_recovery_capabilities,
-                     valid_series_modification_capabilities, valid_future_termination_capabilities)
+                     valid_series_modification_capabilities, valid_future_termination_capabilities,
+                     valid_all_day_dates_capabilities)
 from .schema import RECOVERY_TOOLS, ValidationError, tools_for_capabilities, validate_arguments
 
 VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
@@ -57,12 +58,16 @@ class Protocol:
                   if self.series_modification and capabilities["storage_version"] >= 4 else None)
         self.future_modification = valid_future_modification_capabilities(future)
         termination = (getattr(broker, "future_termination_capabilities", lambda: None)()
-                       if self.future_modification and capabilities["storage_version"] == 5 else None)
+                       if self.future_modification and capabilities["storage_version"] >= 5 else None)
         self.future_termination = valid_future_termination_capabilities(termination)
+        civil = (getattr(broker, "all_day_dates_capabilities", lambda: None)()
+                 if self.recovery and capabilities["storage_version"] == 6 and self.alerts else None)
+        self.all_day_dates = valid_all_day_dates_capabilities(civil)
         self.tools = [item for item in tools_for_capabilities(alerts=self.alerts, recurrence=self.recurrence,
                                                            series_modification=self.series_modification,
                                                            future_modification=self.future_modification,
-                                                           future_termination=self.future_termination)
+                                                           future_termination=self.future_termination,
+                                                           all_day_dates=self.all_day_dates)
                       if self.recovery or item["name"] not in RECOVERY_TOOLS]
 
     def handle(self, request):
@@ -126,6 +131,8 @@ class Protocol:
                             result["instructions"] += FUTURE_TERMINATION_INSTRUCTIONS
             else:
                 result["instructions"] += " Recurring creation, recurring occurrence deletion and version-3 previews require a verified recurrence-capable native helper."
+            if self.all_day_dates:
+                result["instructions"] += " Nonrecurring floating all-day creation/date edits use fields.all_day_dates with exact Gregorian start_date and end_date_exclusive, 1–366 calendar days, scope this. Do not mix with start/end/time_zone/all_day/recurrence. Version-7 previews sign native default projection_time_zone, civil before/after intervals, actual inclusive-last-second write fields and two exact accepted readback end representations. Events remain floating/time_zone:null. Named-zone timestamp-style all-day creation is converted to a fresh v7 preview; nil-zone timestamp creation and floating timestamp date edits require all_day_dates. Metadata-only edits keep preserve-only contracts. Use ordinary commit_create/commit_modify and one-source commit_rollback only; v4–v6 tools reject v7. Recovery restores civil dates and supported fields/alarms, not necessarily the original raw endpoint style. Projection-zone changes fail closed; no recurring/detached structural edits. Fresh all-day deletion, cutoff termination and copy restoration are unsupported, including named-zone events; timed version-6 behavior is unchanged. Old unclaimed structural all-day previews require fresh preflight; exact old nonce replay, including unknown, remains authoritative. No retry or reconciliation is implied."
         elif method == "ping":
             if params:
                 return error(identifier, -32602, "Ping takes no parameters")
@@ -188,11 +195,20 @@ class Protocol:
                     result = {"content": [{"type": "text", "text": json.dumps({"code": "feature_unavailable",
                                "message": "Future termination and independent-copy recovery require verified storage-5 native capabilities; no request was dispatched"})}], "isError": True}
                     return {"jsonrpc": "2.0", "id": identifier, "result": result}
+            if not self.all_day_dates and isinstance(arguments, dict):
+                fields = arguments.get("fields")
+                preview = arguments.get("preview")
+                envelope = preview.get("envelope") if isinstance(preview, dict) else None
+                if ((name == "preflight_change" and isinstance(fields, dict) and "all_day_dates" in fields)
+                        or (name.startswith("commit_") and isinstance(envelope, dict) and envelope.get("version") == 7)):
+                    result = {"content": [{"type": "text", "text": json.dumps({"code": "feature_unavailable",
+                               "message": "Civil all-day dates require exact storage-6 native capabilities; no request dispatched"})}], "isError": True}
+                    return {"jsonrpc": "2.0", "id": identifier, "result": result}
             try:
                 validate_arguments(name, arguments, alerts=self.alerts, recurrence=self.recurrence,
                                    series_modification=self.series_modification,
                                    future_modification=self.future_modification,
-                                   future_termination=self.future_termination)
+                                   future_termination=self.future_termination, all_day_dates=self.all_day_dates)
             except ValidationError as exc:
                 return error(identifier, -32602, str(exc))
             try:

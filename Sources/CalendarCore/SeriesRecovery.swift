@@ -15,6 +15,9 @@ extension Broker {
     func rejectSeriesCrossing(_ sources: [[String]]) throws {
         guard let earliest = sources.compactMap({ Int($0[7]) }).min(), !sources.isEmpty else { throw CoreError("invalid_selection", "Missing rollback history") }
         for row in try state.recoveryRows() where (Int(row[7]) ?? 0) > earliest {
+            if try isAllDayExecution(row) {
+                guard try sources.allSatisfy({ try state.executionsProvenDisjoint($0, from: row) }) else { throw CoreError("rollback_all_day_boundary", "Ordinary recovery cannot cross related civil-date history") }
+            }
             if try isSeriesExecution(row) {
                 guard try sources.allSatisfy({ try state.executionsProvenDisjoint($0, from: row) }) else { throw CoreError("rollback_series_boundary", "Occurrence recovery cannot cross a possibly related later series default-field intent") }
             }

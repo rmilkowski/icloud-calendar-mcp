@@ -87,15 +87,17 @@ final class RecurrenceTests: XCTestCase {
         XCTAssertEqual(try state.execution(preview["envelope"]["nonce"].string!)?.payload, preview["envelope"]); try state.verifyAudit()
     }
 
-    func testCreateFrequenciesCountUntilOpenEndAndDSTAllDay() throws {
+    func testCreateFrequenciesCountUntilOpenEndRejectsAllDayStructuralCreation() throws {
         let state = try state(), backend = SyntheticBackend(), broker = Broker(state: state, backend: backend)
         for frequency in ["daily", "weekly", "monthly", "yearly"] {
             for end: JSON in [.null, .object(["count": .int(1)]), .object(["count": .int(1000)]), .object(["until": .string("2027-10-25T10:00:00Z")])] {
                 XCTAssertEqual(commit(broker, create(broker, recurrence: rule(frequency, interval: 2, end: end)))["result"]["state"], .string("applied"))
             }
         }
+        let before = backend.writeCount, intents = try state.rows("SELECT nonce FROM executions").count
         let preview = create(broker, recurrence: rule("daily"), extra: ["start": .string("2026-10-25T00:00:00+01:00"), "end": .string("2026-10-26T00:00:00Z"), "all_day": .bool(true)])
-        XCTAssertEqual(commit(broker, preview)["result"]["state"], .string("applied")); XCTAssertEqual(backend.events.last?.fields.allDay, true)
+        XCTAssertEqual(preview, .null); XCTAssertEqual(backend.writeCount, before)
+        XCTAssertEqual(try state.rows("SELECT nonce FROM executions").count, intents)
     }
 
     func testScopeTamperCanonicalAndLegacyRecurrenceRejectBeforeIntent() throws {

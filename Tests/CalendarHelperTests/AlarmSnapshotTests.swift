@@ -149,7 +149,7 @@ final class AlarmSnapshotTests: XCTestCase {
             XCTAssertEqual(call(broker, "commit_modify", ["preview": old]), result)
             var alternative = original.object!; alternative["before"] = try oldSnapshot(original["before"])
             XCTAssertEqual(call(broker, "commit_modify", ["preview": try sign(.object(alternative), state)])["error"]["code"], .string("nonce_conflict"))
-            XCTAssertEqual(base.writeCount, 1); XCTAssertEqual(try state.metadata("recovery_storage_version"), "5"); try state.verifyAudit()
+            XCTAssertEqual(base.writeCount, 1); XCTAssertEqual(try state.metadata("recovery_storage_version"), "6"); try state.verifyAudit()
         }
     }
 
@@ -241,7 +241,7 @@ final class AlarmSnapshotTests: XCTestCase {
         XCTAssertEqual(try broker.sourceDigest(source), sourceDigest)
         XCTAssertEqual(try state.rows("SELECT nonce,payload_cipher,result_cipher FROM execution_details WHERE nonce=?", [nonce]), [history[1]])
         XCTAssertEqual(try state.rows("SELECT nonce,key FROM execution_keys WHERE nonce=?", [nonce]), [history[2]])
-        XCTAssertEqual(try state.metadata("recovery_storage_version"), "5"); try state.verifyAudit()
+        XCTAssertEqual(try state.metadata("recovery_storage_version"), "6"); try state.verifyAudit()
     }
 
     func testRealAlarmChangeDuringRestorationStaysUnknown() throws {
@@ -268,7 +268,7 @@ final class AlarmSnapshotTests: XCTestCase {
             let result = call(broker, op, ["preview": preview]); XCTAssertEqual(result["result"]["state"], .string("unknown")); XCTAssertEqual(call(broker, op, ["preview": preview]), result)
             let next = draft(broker, eventID, title: "Blocked", series: series)
             XCTAssertEqual(call(broker, op, ["preview": next])["error"]["code"], .string("unresolved_write")); XCTAssertEqual(base.writeCount, 1)
-            XCTAssertEqual(try state.metadata("recovery_storage_version"), "5"); try state.verifyAudit()
+            XCTAssertEqual(try state.metadata("recovery_storage_version"), "6"); try state.verifyAudit()
         }
     }
 }

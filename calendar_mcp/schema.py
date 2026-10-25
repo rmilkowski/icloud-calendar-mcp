@@ -347,12 +347,66 @@ FUTURE_TERMINATION_TOOLS.extend([
          obj({"preview": FUTURE_RESTORE_PREVIEW}, ("preview",)), write=True)])
 
 
+
+ALL_DAY_INTERVAL = obj({"start_date": string(10, minLength=10, format="date"),
+                        "end_date_exclusive": string(10, minLength=10, format="date")},
+                       ("start_date", "end_date_exclusive"))
+ALL_DAY_LIMITATION = "Recovery restores the retained civil-date interval and supported fields. EventKit may return an exclusive-midnight or inclusive-last-second end representation; the original raw endpoint representation is not guaranteed."
+ALL_DAY_READBACK_ENDS = ["exclusive_midnight", "inclusive_last_second"]
+ALL_DAY_CONTRACT = obj({"version": {"type": "integer", "enum": [1]},
+    "semantics": string(enum=["floating_civil_dates"]), "projection_time_zone": string(100, minLength=1),
+    "before": {**ALL_DAY_INTERVAL, "type": ["object", "null"]}, "after": ALL_DAY_INTERVAL,
+    "write_end": string(enum=["inclusive_last_second"]),
+    "readback_ends": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": True,
+                      "items": string(enum=ALL_DAY_READBACK_ENDS)}},
+    ("version", "semantics", "projection_time_zone", "before", "after", "write_end", "readback_ends"))
+ALL_DAY_AFTER = {**SERIES_AFTER, "properties": {**SERIES_AFTER["properties"],
+                 "time_zone": {"type": "null"}, "all_day": {"type": "boolean", "enum": [True]}}}
+ALL_DAY_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
+    "version": {"type": "integer", "enum": [7]}, "scope": string(enum=["this"]),
+    "action": string(enum=["modify"]), "before": EVENT, "after": ALL_DAY_AFTER,
+    "all_day": ALL_DAY_CONTRACT,
+    "recovery": obj({"mode": string(enum=["all_day_fields"]),
+        "limitations": {"type": "array", "minItems": 1, "maxItems": 1, "items": string(enum=[ALL_DAY_LIMITATION])}},
+        ("mode", "limitations"))}, "required": [*ENVELOPE["required"], "all_day", "recovery"]}
+ALL_DAY_CREATE_ENVELOPE = {**ALL_DAY_ENVELOPE, "properties": {**ALL_DAY_ENVELOPE["properties"],
+    "action": string(enum=["create"]), "before": {"type": "null"},
+    "after": {**ALL_DAY_AFTER, "required": [*ALL_DAY_AFTER["required"], "alerts"]},
+    "recovery": obj({"mode": string(enum=["not_applicable"]),
+        "limitations": {"type": "array", "maxItems": 0, "items": string()}}, ("mode", "limitations"))}}
+ALL_DAY_ROLLBACK = {**ALERT_ROLLBACK, "properties": {**ALERT_ROLLBACK["properties"],
+    "source_change_ids": {**CHANGE_IDS, "maxItems": 1}, "restoration": {"type": "null"},
+    "limitations": {"type": "array", "minItems": 1, "maxItems": 1, "items": string(enum=[ALL_DAY_LIMITATION])}}}
+ALL_DAY_ROLLBACK_ENVELOPE = {**ALL_DAY_ENVELOPE, "properties": {**ALL_DAY_ENVELOPE["properties"],
+    "after": {**SNAPSHOT_FIELDS, "properties": {**SNAPSHOT_FIELDS["properties"],
+        "time_zone": {"type": "null"}, "all_day": {"type": "boolean", "enum": [True]}}},
+    "rollback": ALL_DAY_ROLLBACK}, "required": [*ALL_DAY_ENVELOPE["required"], "rollback"]}
+ALL_DAY_PREVIEWS = {name: obj({"envelope": envelope, "authentication_tag": string(256, minLength=1)},
+                            ("envelope", "authentication_tag")) for name, envelope in (
+    ("commit_create", ALL_DAY_CREATE_ENVELOPE), ("commit_modify", ALL_DAY_ENVELOPE),
+    ("commit_rollback", ALL_DAY_ROLLBACK_ENVELOPE))}
+
+
 def tools_for_capabilities(*, alerts, recurrence=False, series_modification=False, future_modification=False,
-                           future_termination=False):
-    return (FUTURE_TERMINATION_TOOLS if future_termination and future_modification and series_modification and recurrence and alerts else
+                           future_termination=False, all_day_dates=False):
+    base = (FUTURE_TERMINATION_TOOLS if future_termination and future_modification and series_modification and recurrence and alerts else
             FUTURE_MODIFICATION_TOOLS if future_modification and series_modification and recurrence and alerts else
             SERIES_MODIFICATION_TOOLS if series_modification and recurrence and alerts else
             RECURRENCE_TOOLS if recurrence and alerts else TOOLS if alerts else LEGACY_TOOLS)
+    if not all_day_dates or not alerts:
+        return base
+    result = deepcopy(base)
+    for item in result:
+        if item["name"] == "preflight_change":
+            item["inputSchema"]["properties"]["fields"]["properties"]["all_day_dates"] = ALL_DAY_INTERVAL
+            item["description"] += " Nonrecurring floating all-day create/date edits use fields.all_day_dates:{start_date,end_date_exclusive}, strict Gregorian dates spanning 1–366 calendar days, scope this. Do not mix with start/end/time_zone/all_day/recurrence. Create needs calendar_id, title and all_day_dates; modify needs event_id. Named-zone timestamp all-day creation converts to a fresh version-7 preview. Metadata-only edits preserve exact raw temporal state. Fresh all-day deletion, copy restoration and cutoff termination are unsupported, including named-zone events; timed termination remains supported."
+        if item["name"] in ALL_DAY_PREVIEWS:
+            old = item["inputSchema"]["properties"]["preview"]
+            item["inputSchema"]["properties"]["preview"] = {"oneOf": [*old["oneOf"], ALL_DAY_PREVIEWS[item["name"]]]}
+            item["description"] += " Version-7 arguments sign floating civil dates, native default projection zone, actual inclusive-last-second assignment and exact two-style readback contract. Recovery restores civil dates and supported fields/alarms, not necessarily original raw end style. Pass the entire unchanged signed preview; old structural all-day nonces retain exact replay and unknown protection."
+        if item["name"] in ("commit_delete", "preflight_rollback", "commit_rollback", "commit_future_delete", "commit_future_restore"):
+            item["description"] += " Fresh all-day deletion, cutoff termination and copy restoration are unsupported, including named-zone events. Exact recorded-nonce replay remains available; civil-date inverse modification is not copy restoration."
+    return result
 
 
 class ValidationError(ValueError):
@@ -431,11 +485,11 @@ def validate(value, schema, path="arguments", depth=0):
 
 
 def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series_modification=False,
-                       future_modification=False, future_termination=False):
+                       future_modification=False, future_termination=False, all_day_dates=False):
     tools = {item["name"]: item for item in tools_for_capabilities(alerts=alerts, recurrence=recurrence,
                                                                series_modification=series_modification,
                                                                future_modification=future_modification,
-                                                               future_termination=future_termination)}
+                                                               future_termination=future_termination, all_day_dates=all_day_dates)}
     if name not in tools:
         raise ValidationError("Unknown tool")
     validate(arguments, tools[name]["inputSchema"])
@@ -459,8 +513,17 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series
             raise ValidationError("Series title must not be blank")
         if rule is not None:
             validate_recurrence(rule)
+        civil = fields.get("all_day_dates") if fields else None
+        if civil is not None:
+            if action not in ("create", "modify") or arguments["scope"] != "this" or set(fields) & {"start", "end", "time_zone", "all_day", "recurrence"}:
+                raise ValidationError("Civil all-day dates require nonrecurring scope this and cannot mix temporal fields")
+            validate_all_day_interval(civil)
+        if all_day_dates and action == "create" and fields and fields.get("all_day") is True:
+            if arguments["scope"] != "this" or rule is not None or not isinstance(fields.get("time_zone"), str):
+                raise ValidationError("Use all_day_dates for floating all-day creation; recurring structural creation is unsupported")
         if action == "create":
-            if "calendar_id" not in arguments or "event_id" in arguments or fields is None or not {"title", "start", "end"} <= fields.keys():
+            required = {"title", "all_day_dates"} if civil is not None else {"title", "start", "end"}
+            if "calendar_id" not in arguments or "event_id" in arguments or fields is None or not required <= fields.keys():
                 raise ValidationError("Create requires calendar_id and title/start/end only")
         elif "event_id" not in arguments or "calendar_id" in arguments or (action == "delete" and fields is not None) or (action == "modify" and not fields):
             raise ValidationError("Modify/delete require event_id and action-appropriate fields")
@@ -480,6 +543,8 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series
                 "modify" if name in ("commit_series_modify", "commit_future_modify") else
                 "delete" if name == "commit_future_delete" else "create" if name == "commit_future_restore" else name.removeprefix("commit_"))):
         raise ValidationError("Preview action does not match commit tool")
+    if name in ALL_DAY_PREVIEWS and arguments["preview"]["envelope"]["version"] == 7:
+        validate_all_day_preview(arguments["preview"]["envelope"], rollback=name == "commit_rollback")
     if name in ("commit_series_modify", "commit_series_rollback"):
         validate_series_preview(arguments["preview"]["envelope"], rollback=name == "commit_series_rollback")
     if name in ("commit_future_modify", "commit_future_rollback"):
@@ -678,3 +743,36 @@ def _validate_future_termination_preview(envelope, *, restore):
         for event in (anchor, reference):
             if before["id"] == event["id"] and before != event:
                 raise ValidationError("One deletion reference identity requires the same signed snapshot")
+
+
+def validate_all_day_interval(value):
+    validate(value, ALL_DAY_INTERVAL)
+    span = (datetime.strptime(value["end_date_exclusive"], "%Y-%m-%d").date()
+            - datetime.strptime(value["start_date"], "%Y-%m-%d").date()).days
+    if not 1 <= span <= 366:
+        raise ValidationError("All-day civil interval must span 1 through 366 calendar days")
+
+
+def validate_all_day_preview(envelope, *, rollback):
+    contract, before, after = envelope["all_day"], envelope["before"], envelope["after"]
+    create = envelope["action"] == "create"
+    if (contract["before"] is None) != create or contract["readback_ends"] != ALL_DAY_READBACK_ENDS:
+        raise ValidationError("All-day preview requires exact action-specific civil dates and ordered readback styles")
+    validate_all_day_interval(contract["after"])
+    if before is not None:
+        validate_all_day_interval(contract["before"])
+        if (before["recurring"] or before["detached"] or not before["fields"]["all_day"]
+                or before["fields"]["time_zone"] is not None or before["calendar"] != envelope["calendar"]):
+            raise ValidationError("Civil date edits require one nonrecurring floating all-day target")
+    if rollback:
+        if envelope["rollback"]["limitations"] != [ALL_DAY_LIMITATION]:
+            raise ValidationError("All-day inverse requires the exact raw-end-style limitation")
+    else:
+        for name in ("title", "notes", "location"):
+            if create or after[name] != before["fields"][name]:
+                validate(after[name], FIELDS["properties"][name])
+        if not after["title"].strip():
+            raise ValidationError("All-day title must not be blank")
+    # The native Foundation codec alone binds civil labels to the captured
+    # default zone, exact instants and supported raw representations. Do not
+    # normalize the signed payload or substitute a Python timezone projection.

@@ -5,6 +5,34 @@ import CalendarCore
 
 /// Created lazily only for an explicitly selected live backend. No permission prompt.
 final class EventKitBackend: CalendarBackend {
+    func allDayProjectionTimeZone() throws -> String { NSTimeZone.default.identifier }
+    func applyAllDay(calendarID: String, existing: EventRecord?, fields: EventFields, interval: AllDayInterval, restoredAlarms: JSON?) throws -> EventRecord {
+        try refresh()
+        guard let calendar = store.calendar(withIdentifier: calendarID), self.calendar(calendar).writable else { throw CoreError("read_only", "Calendar is no longer writable") }
+        guard try allDayProjectionTimeZone() == interval.projectionTimeZone,
+              try AllDayInterval(interval.json, projectionTimeZone: interval.projectionTimeZone) == interval,
+              fields == interval.materialized(fields) else { throw CoreError("stale_timezone", "All-day projection changed before assignment") }
+        let event: EKEvent
+        if let existing {
+            guard !existing.recurring, !existing.detached, existing.occurrence == nil, existing.fields.allDay, existing.fields.timeZone == nil else { throw CoreError("unsupported_all_day", "Civil-date writes require one floating all-day event") }
+            event = try resolve(nativeID: existing.nativeID, calendarID: calendarID, occurrence: nil, knownStart: parseDate(existing.fields.start))
+            guard try record(event) == existing, !event.hasAttendees, event.organizer == nil else { throw CoreError("stale_event", "All-day event changed immediately before write") }
+        } else { event = EKEvent(eventStore: store); event.calendar = calendar }
+        if existing == nil || existing?.fields.title != fields.title { event.title = fields.title }
+        interval.assign(setAllDay: { event.isAllDay = $0 }, setTimeZone: { event.timeZone = $0 }, setStart: { event.startDate = $0 }, setEnd: { event.endDate = $0 })
+        if existing == nil || existing?.fields.location != fields.location { event.location = fields.location }
+        if existing == nil || existing?.fields.notes != fields.notes { event.notes = fields.notes }
+        if let restoredAlarms { event.alarms = try self.restoredAlarms(restoredAlarms) }
+        else if let alerts = fields.alerts {
+            event.alarms = try alerts.map { alert in
+                if let at = alert.at { return EKAlarm(absoluteDate: try parseDate(at)) }
+                return EKAlarm(relativeOffset: Double(alert.relativeMinutes!) * 60)
+            }
+        }
+        guard try allDayProjectionTimeZone() == interval.projectionTimeZone else { throw CoreError("stale_timezone", "All-day projection changed immediately before save") }
+        try store.save(event, span: .thisEvent, commit: true)
+        return try record(event)
+    }
     private lazy var store = EKEventStore()
     private func refresh() throws {
         guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else {
@@ -66,6 +94,7 @@ final class EventKitBackend: CalendarBackend {
         return FutureRemovalResult(pastAnchor: past)
     }
     func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
+        guard !fields.allDay else { throw CoreError("unsupported_restore", "All-day independent-copy recovery is unsupported") }
         try refresh()
         guard let calendar = store.calendar(withIdentifier: calendarID), self.calendar(calendar).writable,
               let recurrence = fields.recurrence else { throw CoreError("unsupported_restore", "The writable original calendar and exact retained recurrence are required") }
@@ -209,6 +238,7 @@ final class EventKitBackend: CalendarBackend {
         return try record(e) // Identity provenance only; broker re-fetches for verification.
     }
     func restore(calendarID: String, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
+        guard !fields.allDay else { throw CoreError("unsupported_restore", "All-day copy recovery requires a separately supported civil-date contract") }
         try refresh()
         guard let c = store.calendar(withIdentifier: calendarID), calendar(c).writable else { throw CoreError("read_only", "Original calendar is no longer writable") }
         let e = EKEvent(eventStore: store), (start, end, zone) = try fields.dates()

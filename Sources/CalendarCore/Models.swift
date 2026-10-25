@@ -162,6 +162,8 @@ public struct EventRecord: Equatable {
 }
 
 public protocol CalendarBackend: AnyObject {
+    func allDayProjectionTimeZone() throws -> String
+    func applyAllDay(calendarID: String, existing: EventRecord?, fields: EventFields, interval: AllDayInterval, restoredAlarms: JSON?) throws -> EventRecord
     func removeFuture(selected: EventRecord, originalAnchor: EventRecord, boundaryNow: () -> Date) throws -> FutureRemovalResult
     func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord
     func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult
@@ -177,6 +179,8 @@ public protocol CalendarBackend: AnyObject {
 }
 
 public extension CalendarBackend {
+    func allDayProjectionTimeZone() throws -> String { throw CoreError("unsupported_all_day", "Backend does not support civil-date projection") }
+    func applyAllDay(calendarID: String, existing: EventRecord?, fields: EventFields, interval: AllDayInterval, restoredAlarms: JSON?) throws -> EventRecord { throw CoreError("unsupported_all_day", "Backend does not support civil-date writes") }
     func removeFuture(selected: EventRecord, originalAnchor: EventRecord, boundaryNow: () -> Date) throws -> FutureRemovalResult { throw CoreError("unsupported_scope", "Backend cannot terminate a future pattern") }
     func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord { throw CoreError("unsupported_restore", "Backend cannot create an independent retained tail") }
     func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult { throw CoreError("unsupported_scope", "Backend cannot modify future pattern defaults") }
@@ -191,6 +195,21 @@ public extension CalendarBackend {
 }
 
 public final class SyntheticBackend: CalendarBackend {
+    public var allDayProjectionZone = "Europe/London"
+    public var allDayUsesExclusiveEnd = false
+    public func allDayProjectionTimeZone() throws -> String { allDayProjectionZone }
+    public func applyAllDay(calendarID: String, existing: EventRecord?, fields: EventFields, interval: AllDayInterval, restoredAlarms: JSON?) throws -> EventRecord {
+        guard allDayProjectionZone == interval.projectionTimeZone, fields == interval.materialized(fields) else { throw CoreError("stale_timezone", "Synthetic projection or all-day assignment changed") }
+        if let existing {
+            guard try get(nativeID: existing.nativeID, calendarID: calendarID, occurrence: existing.occurrence, knownStart: parseDate(existing.fields.start)) == existing else { throw CoreError("stale_event", "Synthetic all-day target changed") }
+        }
+        var assigned = fields
+        if allDayUsesExclusiveEnd { assigned.end = iso(interval.endExclusive) }
+        let result: EventRecord?
+        if let existing, let restoredAlarms { result = try applyRestoringAlarms(calendarID: calendarID, existing: existing, fields: assigned, alarms: restoredAlarms) }
+        else { result = try apply(action: existing == nil ? "create" : "modify", calendarID: calendarID, existing: existing, fields: assigned) }
+        guard let result else { throw CoreError("verification_failed", "Synthetic all-day save returned no identity") }; return result
+    }
     public var calendarRecords: [CalendarRecord]
     public var events: [EventRecord]
     public private(set) var writeCount = 0
