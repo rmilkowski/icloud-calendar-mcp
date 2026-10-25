@@ -21,6 +21,11 @@ final class EventKitRecurrenceTests: XCTestCase {
                         func numbers(_ values: [NSNumber]?) -> JSON { .array((values ?? []).map { .int($0.intValue) }) }
                         let observed: JSON = .object(["calendar_identifier": .string(rule.calendarIdentifier), "frequency": .int(rule.frequency.rawValue), "interval": .int(rule.interval), "first_day": .int(rule.firstDayOfTheWeek), "days_of_week": .array((rule.daysOfTheWeek ?? []).map { .object(["day": .int($0.dayOfTheWeek.rawValue), "week": .int($0.weekNumber)]) }), "days_of_month": numbers(rule.daysOfTheMonth), "days_of_year": numbers(rule.daysOfTheYear), "weeks_of_year": numbers(rule.weeksOfTheYear), "months_of_year": numbers(rule.monthsOfTheYear), "set_positions": numbers(rule.setPositions), "end_date": .optional(rule.recurrenceEnd?.endDate.map(iso)), "occurrence_count": rule.recurrenceEnd.map { .int($0.occurrenceCount) } ?? .null])
                         XCTAssertTrue(intent.matches(raw: .array([observed])), "\(intent.json) / \(observed)")
+                        if intent.count == nil {
+                            let start = "2026-10-25T10:00:00.000Z"
+                            let anchor = EventRecord(nativeID: "constructor", calendarNativeID: "synthetic", occurrence: start, fields: EventFields(title: "Constructor", start: start, end: "2026-10-25T11:00:00.000Z", timeZone: "Europe/London", allDay: false), recurring: true, details: .object(["recurrence_rules": .array([observed])]))
+                            XCTAssertEqual(try FutureTerminationPattern.copyRecurrence(selected: anchor, anchor: anchor, now: .distantPast), intent)
+                        }
                     }
                 }
             }

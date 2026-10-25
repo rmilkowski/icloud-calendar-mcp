@@ -302,7 +302,7 @@ final class FutureModificationTests: XCTestCase {
         }
         do {
             let state = try StateStore(directory: directory)
-            XCTAssertEqual(try state.metadata("recovery_storage_version"), "4")
+            XCTAssertEqual(try state.metadata("recovery_storage_version"), "5")
             for table in tables { XCTAssertEqual(try state.rows("SELECT * FROM " + table + " ORDER BY rowid"), snapshots[table], table) }
             try state.verifyAudit()
         }

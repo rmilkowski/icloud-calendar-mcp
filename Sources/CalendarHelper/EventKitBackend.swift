@@ -52,6 +52,61 @@ final class EventKitBackend: CalendarBackend {
     func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord {
         try refresh(); return try record(firstSeriesEvent(for: selected))
     }
+    func removeFuture(selected: EventRecord, originalAnchor: EventRecord, boundaryNow: () -> Date) throws -> FutureRemovalResult {
+        try refresh()
+        guard let calendar = store.calendar(withIdentifier: selected.calendarNativeID), self.calendar(calendar).writable else { throw CoreError("read_only", "Calendar is no longer writable") }
+        let event = try resolve(nativeID: selected.nativeID, calendarID: selected.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start)), first = try firstSeriesEvent(for: selected)
+        guard try record(event) == selected, try record(first) == originalAnchor,
+              !event.hasAttendees, event.organizer == nil, !first.hasAttendees, first.organizer == nil else { throw CoreError("stale_event", "Termination boundary or first anchor changed immediately before removal") }
+        _ = try FutureTerminationPattern.copyRecurrence(selected: selected, anchor: originalAnchor, now: boundaryNow())
+        _ = try FuturePattern.boundary(selected, now: boundaryNow())
+        try store.remove(event, span: .futureEvents, commit: true)
+        try refresh()
+        let past = originalAnchor.occurrence == selected.occurrence ? nil : try record(resolve(nativeID: originalAnchor.nativeID, calendarID: originalAnchor.calendarNativeID, occurrence: originalAnchor.occurrence, knownStart: parseDate(originalAnchor.fields.start)))
+        return FutureRemovalResult(pastAnchor: past)
+    }
+    func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
+        try refresh()
+        guard let calendar = store.calendar(withIdentifier: calendarID), self.calendar(calendar).writable,
+              let recurrence = fields.recurrence else { throw CoreError("unsupported_restore", "The writable original calendar and exact retained recurrence are required") }
+        let (start, end, zone) = try FutureTerminationPattern.validateRetainedFields(fields)
+        let event = EKEvent(eventStore: store); event.calendar = calendar
+        event.title = fields.title; event.startDate = start; event.endDate = end; event.timeZone = zone; event.isAllDay = fields.allDay
+        event.notes = fields.notes; event.location = fields.location
+        if let text = details["url"].string { guard let url = URL(string: text) else { throw CoreError("unsupported_restore", "Invalid retained URL") }; event.url = url }
+        event.structuredLocation = try restoredLocation(details["structured_location"]); event.alarms = try restoredAlarms(details["alarms"])
+        switch availability {
+        case "free": event.availability = .free
+        case "busy": event.availability = .busy
+        case "tentative": event.availability = .tentative
+        case "unavailable": event.availability = .unavailable
+        case "unknown": event.availability = .notSupported
+        default: throw CoreError("unsupported_restore", "Unsupported retained availability")
+        }
+        event.recurrenceRules = [try recurrenceRule(recurrence)]
+        guard calendarID == originalSelected.calendarNativeID else { throw CoreError("stale_calendar", "Original calendar binding changed") }
+        do {
+            _ = try resolve(nativeID: originalSelected.nativeID, calendarID: calendarID, occurrence: originalSelected.occurrence, knownStart: parseDate(originalSelected.fields.start))
+            throw CoreError("stale_rollback", "Original boundary reappeared immediately before independent creation")
+        } catch let error as CoreError where error.code == "event_missing" { }
+        if let expectedPrefix {
+            guard try record(resolve(nativeID: expectedPrefix.nativeID, calendarID: calendarID, occurrence: expectedPrefix.occurrence, knownStart: parseDate(expectedPrefix.fields.start))) == expectedPrefix else { throw CoreError("stale_rollback", "Original prefix changed immediately before independent creation") }
+        }
+        try store.save(event, span: .futureEvents, commit: true)
+        let saved = try record(event)
+        try refresh()
+        return try record(firstSeriesEvent(for: saved))
+    }
+    private func recurrenceRule(_ recurrence: EventRecurrence) throws -> EKRecurrenceRule {
+        let frequency: EKRecurrenceFrequency
+        switch recurrence.frequency { case "daily": frequency = .daily; case "weekly": frequency = .weekly; case "monthly": frequency = .monthly; default: frequency = .yearly }
+        let end: EKRecurrenceEnd?
+        if let count = recurrence.count { end = EKRecurrenceEnd(occurrenceCount: count) }
+        else if let until = recurrence.until { end = EKRecurrenceEnd(end: try parseDate(until)) }
+        else { end = nil }
+        let days = recurrence.daysOfWeek?.map { EKRecurrenceDayOfWeek(EKWeekday(rawValue: $0)!) }
+        return EKRecurrenceRule(recurrenceWith: frequency, interval: recurrence.interval, daysOfTheWeek: days, daysOfTheMonth: nil, monthsOfTheYear: nil, weeksOfTheYear: nil, daysOfTheYear: nil, setPositions: nil, end: end)
+    }
     func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult {
         try refresh()
         guard let calendar = store.calendar(withIdentifier: selected.calendarNativeID), self.calendar(calendar).writable else { throw CoreError("read_only", "Calendar is no longer writable") }
@@ -143,16 +198,7 @@ final class EventKitBackend: CalendarBackend {
                 return EKAlarm(relativeOffset: Double(alert.relativeMinutes!) * 60)
             }
         }
-        if let recurrence = fields.recurrence {
-            let frequency: EKRecurrenceFrequency
-            switch recurrence.frequency { case "daily": frequency = .daily; case "weekly": frequency = .weekly; case "monthly": frequency = .monthly; default: frequency = .yearly }
-            let end: EKRecurrenceEnd?
-            if let count = recurrence.count { end = EKRecurrenceEnd(occurrenceCount: count) }
-            else if let until = recurrence.until { end = EKRecurrenceEnd(end: try parseDate(until)) }
-            else { end = nil }
-            let days = recurrence.daysOfWeek?.map { EKRecurrenceDayOfWeek(EKWeekday(rawValue: $0)!) }
-            e.recurrenceRules = [EKRecurrenceRule(recurrenceWith: frequency, interval: recurrence.interval, daysOfTheWeek: days, daysOfTheMonth: nil, monthsOfTheYear: nil, weeksOfTheYear: nil, daysOfTheYear: nil, setPositions: nil, end: end)]
-        }
+        if let recurrence = fields.recurrence { e.recurrenceRules = [try recurrenceRule(recurrence)] }
         try store.save(e, span: fields.recurrence == nil ? .thisEvent : .futureEvents, commit: true)
         if fields.recurrence != nil {
             guard let first = store.calendarItem(withIdentifier: e.calendarItemIdentifier) as? EKEvent,

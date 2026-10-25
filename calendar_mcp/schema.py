@@ -1,7 +1,7 @@
 """Auditable JSON Schema subset, shared by tool publication and validation."""
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -193,6 +193,52 @@ FUTURE_ROLLBACK_ENVELOPE = {**FUTURE_ENVELOPE, "properties": {**FUTURE_ENVELOPE[
 FUTURE_ROLLBACK_PREVIEW = obj({"envelope": FUTURE_ROLLBACK_ENVELOPE,
                               "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
 
+FUTURE_CUTOFF = {"oneOf": [
+    obj({"date": string(10, minLength=10, format="date"),
+         "time_zone": string(100, format="time-zone")}, ("date", "time_zone")),
+    obj({"at": STAMP}, ("at",))]}
+FUTURE_TERMINATION_LIMITATIONS = [
+    "Stops the current provider pattern from the selected future occurrence, including that occurrence and later occurrences in the pattern. Earlier occurrence fields and times are outside the deletion; other split segments and independent copies are not included.",
+    "The supplied cutoff is inclusive. The signed boundary is the first eligible occurrence found at or after that cutoff in the signed bounded selection window. It must still be in the future when removal begins. Excluded dates have no default occurrence to select.",
+    "EventKit controls recurrence termination, detached overrides and exclusions. Detached or moved occurrences may survive, including ones before the selected default boundary or beyond the bounded query. Those require separate identified occurrence deletion; this operation does not prove that every event after the cutoff is removed.",
+    "Recovery creates a separate recurring series from the original deleted boundary with new provider identities and the retained default fields and supported rule. The original earlier segment stays truncated; the new series is not reattached or merged with it.",
+    "Recovery does not restore exclusions or detached overrides. Previously skipped occurrences can reappear, and surviving moved or detached events can be duplicated by new default occurrences. Other split segments and independent copies are neither restored nor removed.",
+    "Recovery may recreate occurrences from the original deleted boundary that are already in the past when recovery is approved. It requires a separate exact preview and write confirmation, retained details, unchanged verified prefix state and no conflicting later intent.",
+    "One future termination can remove an unbounded number of occurrences and consumes one delete intent under the installation-wide safety limits. Recovery is a new recurring-series creation under the normal creation policy."]
+FUTURE_TERMINATION_LIMITATION_SCHEMA = {"type": "array", "minItems": 7, "maxItems": 7, "uniqueItems": True,
+    "items": string(2000, enum=FUTURE_TERMINATION_LIMITATIONS)}
+FUTURE_TERMINATION_REFERENCE = obj({
+    "provider_scope": string(enum=["selected_occurrence_and_future"]), "cutoff": FUTURE_CUTOFF,
+    "resolved_cutoff": STAMP, "boundary": STAMP, "reference": EVENT, "first_anchor": EVENT,
+    "selection_window": obj({"start": STAMP, "end": STAMP}, ("start", "end")),
+    "removes_entire_current_pattern": {"type": "boolean"}, "copy_recurrence": CANONICAL_RECURRENCE},
+    ("provider_scope", "cutoff", "resolved_cutoff", "boundary", "reference", "first_anchor",
+     "selection_window", "removes_entire_current_pattern", "copy_recurrence"))
+FUTURE_TERMINATION_RECOVERY = obj({"mode": string(enum=["independent_tail_copy"]),
+    "limitations": FUTURE_TERMINATION_LIMITATION_SCHEMA}, ("mode", "limitations"))
+FUTURE_TERMINATION_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
+    "version": {"type": "integer", "enum": [6]}, "action": string(enum=["delete"]),
+    "scope": string(enum=["future"]), "before": EVENT, "after": {"type": "null"},
+    "future": FUTURE_TERMINATION_REFERENCE, "recovery": FUTURE_TERMINATION_RECOVERY},
+    "required": [*ENVELOPE["required"], "future", "recovery"]}
+FUTURE_TERMINATION_PREVIEW = obj({"envelope": FUTURE_TERMINATION_ENVELOPE,
+    "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+FUTURE_RESTORE_FIELDS = {**SNAPSHOT_FIELDS,
+    "properties": {**SNAPSHOT_FIELDS["properties"], "recurrence": CANONICAL_RECURRENCE},
+    "required": [*SNAPSHOT_FIELDS["required"], "recurrence"]}
+FUTURE_RESTORE_RESTORATION = obj({**ROLLBACK_RESTORATION["properties"],
+    "past_anchor": {**EVENT, "type": ["object", "null"]}}, ("details", "availability", "past_anchor"))
+FUTURE_RESTORE_ROLLBACK = {**ROLLBACK, "properties": {**ROLLBACK["properties"],
+    "source_change_ids": {**CHANGE_IDS, "maxItems": 1}, "restoration": FUTURE_RESTORE_RESTORATION,
+    "limitations": FUTURE_TERMINATION_LIMITATION_SCHEMA}}
+FUTURE_RESTORE_ENVELOPE = {**FUTURE_TERMINATION_ENVELOPE,
+    "properties": {**FUTURE_TERMINATION_ENVELOPE["properties"],
+        "action": string(enum=["create"]), "before": {"type": "null"}, "after": FUTURE_RESTORE_FIELDS,
+        "rollback": FUTURE_RESTORE_ROLLBACK},
+    "required": [*FUTURE_TERMINATION_ENVELOPE["required"], "rollback"]}
+FUTURE_RESTORE_PREVIEW = obj({"envelope": FUTURE_RESTORE_ENVELOPE,
+    "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+
 
 def tool(name, description, schema, *, write=False, destructive=False):
     return {"name": name, "description": description, "inputSchema": schema,
@@ -284,8 +330,27 @@ FUTURE_MODIFICATION_TOOLS.extend([
          obj({"preview": FUTURE_ROLLBACK_PREVIEW}, ("preview",)), write=True, destructive=True)])
 
 
-def tools_for_capabilities(*, alerts, recurrence=False, series_modification=False, future_modification=False):
-    return (FUTURE_MODIFICATION_TOOLS if future_modification and series_modification and recurrence and alerts else
+FUTURE_TERMINATION_TOOLS = deepcopy(FUTURE_MODIFICATION_TOOLS)
+for _tool in FUTURE_TERMINATION_TOOLS:
+    if _tool["name"] == "preflight_change":
+        _tool["inputSchema"]["properties"]["cutoff"] = FUTURE_CUTOFF
+        _tool["description"] = _tool["description"].replace(
+            "Date/time, timezone, all-day, recurrence and calendar changes and series deletion are unsupported.",
+            "Date/time, timezone, all-day, recurrence and calendar changes are unsupported. Stopping the current pattern uses action delete, scope future, event_id and cutoff, without fields. The cutoff is an inclusive local date with an explicit IANA time_zone, or an at instant with an explicit offset. Native selection signs the first eligible default occurrence at or after cutoff in a bounded 366-calendar-day window; it must still be future. Known detached or moved occurrences before that boundary require separate identified occurrence handling. Other split segments, independent copies and potentially surviving detached overrides are outside this operation; arbitrary full-series deletion remains unsupported.")
+        _tool["description"] += " Future termination signs independent_tail_copy recovery: a separate new series can regenerate exclusions, duplicate surviving moved/detached events and recreate past dates. Review all seven exact signed limitations."
+    elif _tool["name"] == "preflight_rollback":
+        _tool["description"] += " One original retained version-6 termination selected alone can prepare a separate independent recurring-series copy through commit_future_restore. This never merges the original truncated prefix or restores exclusions/overrides; skipped dates may reappear, surviving moved/detached events may duplicate, and the original boundary may now be past. Separate exact review and host write confirmation apply."
+FUTURE_TERMINATION_TOOLS.extend([
+    tool("commit_future_delete", "Stop only the current provider pattern from the first eligible future default occurrence at or after the inclusive cutoff in this complete version-6 native-authenticated preview. The preview shows the supplied cutoff, native-resolved boundary, full reference/boundary/first-anchor snapshots, bounded selection window and whether the whole not-yet-started pattern is removed. One delete intent may remove an unbounded number of occurrences. Earlier fields/times, other split segments and independent copies are outside the deletion; detached or moved occurrences may survive. All seven signed limitations disclose separate independent-tail-copy recovery, regenerated exclusions, duplicate moved/detached events and possible past recreation. The preview is the complete execution payload. After uncertain transport results, query get_change_status by its nonce without retrying.",
+         obj({"preview": FUTURE_TERMINATION_PREVIEW}, ("preview",)), write=True, destructive=True),
+    tool("commit_future_restore", "Create one separate recurring series from an original version-6 termination's retained deleted boundary, default fields, supported rule and metadata using this complete native-authenticated recovery preview. This new series has new provider identities and may add unbounded occurrences, regenerate excluded dates, duplicate surviving moved/detached events and recreate dates now in the past. It never reattaches or merges the original truncated prefix or restores exclusion/override topology. The complete preview signs the exact original cutoff/boundary, creation fields/rule, raw restoration metadata, verified prefix state, source binding and all seven independent_tail_copy limitations. Separate host write confirmation and normal creation policy apply. After uncertain transport results, query get_change_status by its nonce without retrying.",
+         obj({"preview": FUTURE_RESTORE_PREVIEW}, ("preview",)), write=True)])
+
+
+def tools_for_capabilities(*, alerts, recurrence=False, series_modification=False, future_modification=False,
+                           future_termination=False):
+    return (FUTURE_TERMINATION_TOOLS if future_termination and future_modification and series_modification and recurrence and alerts else
+            FUTURE_MODIFICATION_TOOLS if future_modification and series_modification and recurrence and alerts else
             SERIES_MODIFICATION_TOOLS if series_modification and recurrence and alerts else
             RECURRENCE_TOOLS if recurrence and alerts else TOOLS if alerts else LEGACY_TOOLS)
 
@@ -357,12 +422,20 @@ def validate(value, schema, path="arguments", depth=0):
                 ZoneInfo(value)
             except (ZoneInfoNotFoundError, ValueError):
                 raise ValidationError(path + " requires a recognized IANA time zone") from None
+        elif schema.get("format") == "date":
+            try:
+                if datetime.strptime(value, "%Y-%m-%d").date().isoformat() != value:
+                    raise ValueError()
+            except ValueError:
+                raise ValidationError(path + " requires an exact real YYYY-MM-DD calendar date") from None
 
 
-def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series_modification=False, future_modification=False):
+def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series_modification=False,
+                       future_modification=False, future_termination=False):
     tools = {item["name"]: item for item in tools_for_capabilities(alerts=alerts, recurrence=recurrence,
                                                                series_modification=series_modification,
-                                                               future_modification=future_modification)}
+                                                               future_modification=future_modification,
+                                                               future_termination=future_termination)}
     if name not in tools:
         raise ValidationError("Unknown tool")
     validate(arguments, tools[name]["inputSchema"])
@@ -373,10 +446,13 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series
         rule = fields.get("recurrence") if fields else None
         series_edit = series_modification and recurrence and alerts and series and action == "modify"
         future_edit = future_modification and series_modification and recurrence and alerts and arguments["scope"] == "future" and action == "modify"
-        if ((not series_edit and not future_edit and series != (action == "create" and rule is not None))
-                or (arguments["scope"] == "future" and not future_edit)
+        future_delete = future_termination and future_modification and series_modification and recurrence and alerts and arguments["scope"] == "future" and action == "delete"
+        if ((not series_edit and not future_edit and not future_delete and series != (action == "create" and rule is not None))
+                or (arguments["scope"] == "future" and not (future_edit or future_delete))
                 or (rule is not None and action != "create")):
             raise ValidationError("Only series creation accepts and requires recurrence; modify/delete require scope this")
+        if ("cutoff" in arguments) != future_delete:
+            raise ValidationError("Only future termination accepts and requires an explicit cutoff")
         if (series_edit or future_edit) and (not fields or set(fields) - set(SERIES_FIELD_NAMES)):
             raise ValidationError("Series modification requires only title, notes, plain location or alerts")
         if (series_edit or future_edit) and "title" in fields and not fields["title"].strip():
@@ -400,12 +476,16 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series
                     raise ValidationError("Alerts must not contain duplicate triggers")
                 normalized.append(key)
     if (name.startswith("commit_") and name not in ("commit_rollback", "commit_series_rollback", "commit_future_rollback")
-            and arguments["preview"]["envelope"]["action"] != ("modify" if name in ("commit_series_modify", "commit_future_modify") else name.removeprefix("commit_"))):
+            and arguments["preview"]["envelope"]["action"] != (
+                "modify" if name in ("commit_series_modify", "commit_future_modify") else
+                "delete" if name == "commit_future_delete" else "create" if name == "commit_future_restore" else name.removeprefix("commit_"))):
         raise ValidationError("Preview action does not match commit tool")
     if name in ("commit_series_modify", "commit_series_rollback"):
         validate_series_preview(arguments["preview"]["envelope"], rollback=name == "commit_series_rollback")
     if name in ("commit_future_modify", "commit_future_rollback"):
         validate_future_preview(arguments["preview"]["envelope"], rollback=name == "commit_future_rollback")
+    if name in ("commit_future_delete", "commit_future_restore"):
+        validate_future_termination_preview(arguments["preview"]["envelope"], restore=name == "commit_future_restore")
     if name in ("commit_create", "commit_modify", "commit_delete") and arguments["preview"]["envelope"]["version"] == 3:
         envelope = arguments["preview"]["envelope"]
         action, before, after = envelope["action"], envelope["before"], envelope["after"]
@@ -525,3 +605,76 @@ def validate_future_preview(envelope, *, rollback):
             raise ValidationError("Future title must not be blank")
         if "alerts" not in changed and all(after[field] == before["fields"][field] for field in changed):
             raise ValidationError("Future modification must change at least one default field")
+
+
+def validate_future_termination_preview(envelope, *, restore):
+    try:
+        _validate_future_termination_preview(envelope, restore=restore)
+    except ValidationError:
+        raise
+    except (ValueError, OverflowError):
+        raise ValidationError("Future cutoff/window cannot be represented with its exact timezone semantics") from None
+
+
+def _validate_future_termination_preview(envelope, *, restore):
+    future = envelope["future"]
+    anchor, reference = future["first_anchor"], future["reference"]
+    instant = lambda stamp: datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    boundary, resolved = instant(future["boundary"]), instant(future["resolved_cutoff"])
+    start, end = (instant(future["selection_window"][key]) for key in ("start", "end"))
+    if (future["selection_window"]["start"] != future["resolved_cutoff"]
+            or not start <= boundary < end):
+        raise ValidationError("Future termination requires its exact cutoff and bounded inclusive selection window")
+    cutoff = future["cutoff"]
+    zone = ZoneInfo(cutoff["time_zone"]) if "date" in cutoff else timezone.utc
+    if end != (start.astimezone(zone) + timedelta(days=366)).astimezone(timezone.utc):
+        raise ValidationError("Future termination requires a complete 366-calendar-day selection window")
+    if "date" in cutoff:
+        local = resolved.astimezone(zone)
+        if local.date().isoformat() != cutoff["date"] or any((local.hour, local.minute, local.second, local.microsecond)):
+            raise ValidationError("Future date cutoff must resolve to the supplied local midnight")
+    elif instant(cutoff["at"]) != resolved:
+        raise ValidationError("Future instant cutoff must match its resolved instant")
+    for event in (anchor, reference):
+        if (not event["recurring"] or event["detached"] or event["calendar"] != envelope["calendar"]
+                or event["occurrence"] != event["fields"]["start"]):
+            raise ValidationError("Future termination requires exact recurring reference/anchor snapshots in its calendar")
+        validate(event["occurrence"], STAMP)
+    if (instant(anchor["occurrence"]) > boundary
+            or future["removes_entire_current_pattern"] != (instant(anchor["occurrence"]) == boundary)):
+        raise ValidationError("Future termination requires the exact whole-pattern flag and first anchor")
+    if anchor["id"] == reference["id"] and anchor != reference:
+        raise ValidationError("One termination reference identity requires the same signed snapshot")
+    if anchor["details"].get("recurrence_rules") != reference["details"].get("recurrence_rules"):
+        raise ValidationError("Termination reference and first anchor require the same recurrence rule")
+    if envelope["recovery"]["limitations"] != FUTURE_TERMINATION_LIMITATIONS:
+        raise ValidationError("Future termination requires all seven exact independent-copy recovery limitations")
+    rule = future["copy_recurrence"]
+    validate_recurrence(rule)
+    if rule["end"] is not None and ("until" not in rule["end"] or instant(rule["end"]["until"]) < boundary):
+        raise ValidationError("Future termination copy recurrence must be unbounded or date-ended after its boundary")
+    issued, expires = instant(envelope["issued_at"]), instant(envelope["expires_at"])
+    if expires <= issued:
+        raise ValidationError("Future termination/recovery expiry must follow issuance")
+    if restore:
+        recovery = envelope["rollback"]
+        if (envelope["after"]["start"] != future["boundary"]
+                or envelope["after"]["recurrence"] != rule
+                or recovery["limitations"] != FUTURE_TERMINATION_LIMITATIONS):
+            raise ValidationError("Future restore requires the exact deleted boundary, copy rule and recovery limitations")
+        past = recovery["restoration"]["past_anchor"]
+        if (past is None) != future["removes_entire_current_pattern"]:
+            raise ValidationError("Future restore must sign its exact preserved prefix or whole-pattern absence")
+        if past is not None and (past["id"] != anchor["id"] or past["calendar"] != envelope["calendar"]
+                                 or past["occurrence"] != anchor["occurrence"]):
+            raise ValidationError("Future restore prefix must retain the original first-anchor identity")
+    else:
+        before = envelope["before"]
+        if (not before["recurring"] or before["detached"] or before["calendar"] != envelope["calendar"]
+                or before["occurrence"] != future["boundary"] or before["fields"]["start"] != future["boundary"]
+                or issued >= boundary or expires > boundary
+                or before["details"].get("recurrence_rules") != anchor["details"].get("recurrence_rules")):
+            raise ValidationError("Future deletion requires the exact selected boundary strictly after issue and bounded expiry")
+        for event in (anchor, reference):
+            if before["id"] == event["id"] and before != event:
+                raise ValidationError("One deletion reference identity requires the same signed snapshot")

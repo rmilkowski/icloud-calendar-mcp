@@ -243,7 +243,7 @@ class NativeFutureModificationIntegrationTests(unittest.TestCase):
             if broker.future_modification_capabilities() is None:
                 self.skipTest("Selected helper does not support future default-field modification")
             protocol = Protocol(broker)
-            self.assertEqual(len(protocol.tools), 17)
+            self.assertEqual(len(protocol.tools), 19 if protocol.future_termination else 17)
             def tool(name, arguments=None, *, error=False):
                 reply = protocol.handle(request(name, arguments))
                 self.assertNotIn("error", reply, reply)

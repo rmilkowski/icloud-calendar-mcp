@@ -58,7 +58,7 @@ class RecoverySchemaTests(unittest.TestCase):
             self.assertEqual(json.loads(reply["result"]["content"][0]["text"])["code"], "feature_unavailable")
 
     def test_recovery_contract_accepts_known_storage_and_boolean_local_ui_variation(self):
-        for storage_version, local_ui in ((2, False), (2, True), (3, False), (3, True), (4, False), (4, True)):
+        for storage_version, local_ui in ((2, False), (2, True), (3, False), (3, True), (4, False), (4, True), (5, False), (5, True)):
             capabilities = {**RECOVERY_CAPABILITIES, "storage_version": storage_version, "local_ui": local_ui}
 
             class Broker:
@@ -84,7 +84,7 @@ class RecoverySchemaTests(unittest.TestCase):
                        for missing in RECOVERY_CAPABILITIES)
         invalid.extend({**RECOVERY_CAPABILITIES, "local_ui": value} for value in (None, 0, 1, "false", [], {}))
         invalid.extend({**RECOVERY_CAPABILITIES, key: value} for key, value in
-                       (("version", True), ("version", 1.0), ("storage_version", 2.0), ("storage_version", 5),
+                       (("version", True), ("version", 1.0), ("storage_version", 2.0), ("storage_version", 6),
                         ("storage_version", True), ("recovery", 1),
                         ("detail_retention", 1), ("max_selection", 25.0), ("max_selection", 24)))
         for capabilities in invalid:
@@ -95,6 +95,7 @@ class RecoverySchemaTests(unittest.TestCase):
         for reply in (RECOVERY_CAPABILITIES, {**RECOVERY_CAPABILITIES, "local_ui": False},
                       {**RECOVERY_CAPABILITIES, "storage_version": 3, "local_ui": False},
                       {**RECOVERY_CAPABILITIES, "storage_version": 4, "local_ui": False},
+                      {**RECOVERY_CAPABILITIES, "storage_version": 5, "local_ui": False},
                       NativeError("unknown_operation", "Unknown operation")):
             broker = object.__new__(NativeBroker)
             calls = []

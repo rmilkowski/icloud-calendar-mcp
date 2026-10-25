@@ -21,7 +21,7 @@ extension StateStore {
         case "unresolved_write": return "unresolved_write"
         case "write_safety_limit": return "write_safety_limit"
         case "write_safety_configuration", "recovery_configuration", "invalid_configuration": return "configuration"
-        case "unsupported_recurrence", "unsupported_restore", "unsupported_scope", "unsupported_change", "calendar_read_only", "read_only", "ineligible_event": return "unsupported_change"
+        case "unsupported_detached_boundary", "unsupported_recurrence_phase", "unsupported_recurrence", "unsupported_restore", "unsupported_scope", "unsupported_change", "calendar_read_only", "read_only", "ineligible_event": return "unsupported_change"
         case "audit_unavailable", "audit_corrupt", "state_corrupt": return "audit_unavailable"
         case "native_error": return "native_error"
         default: return "other"
@@ -31,7 +31,7 @@ extension StateStore {
         try transaction {
             let kind = replayed ? "replayed" : "rejected"
             // New dedicated host consent scopes reuse the fixed accounting categories.
-            let category = operation == "commit_future_modify" ? "commit_modify" : operation == "commit_future_rollback" ? "commit_rollback" : operation
+            let category = operation == "commit_future_modify" ? "commit_modify" : operation == "commit_future_rollback" || operation == "commit_future_restore" ? "commit_rollback" : operation == "commit_future_delete" ? "commit_delete" : operation
             let operation = Self.observationOperations.contains(category) ? category : "other_commit"
             let reason = replayed ? "recorded_outcome" : observationReason(code ?? "native_error")
             let origin = localNativeReview ? "local_native_ui" : "chatgpt_host_policy"

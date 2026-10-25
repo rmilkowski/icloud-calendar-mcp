@@ -48,6 +48,11 @@ public final class Broker: @unchecked Sendable {
     }
     private func perform(_ op: String, arguments: JSON) throws -> JSON {
         switch op {
+        case "future_termination_capabilities":
+            _ = try Arguments(arguments, allowed: [])
+            return Self.futureTerminationCapabilities
+        case "commit_future_delete": return try commitTermination(arguments)
+        case "commit_future_restore": return try commitFutureRestore(arguments)
         case "future_modification_capabilities":
             _ = try Arguments(arguments, allowed: [])
             return Self.futureModificationCapabilities
@@ -69,7 +74,7 @@ public final class Broker: @unchecked Sendable {
             return try state.commitObservationStatus()
         case "recovery_capabilities":
             _ = try Arguments(arguments, allowed: [])
-            return .object(["version": .int(1), "storage_version": .int(4), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
+            return .object(["version": .int(1), "storage_version": .int(5), "recovery": .bool(true), "detail_retention": .bool(true), "local_ui": .bool(localRecoveryUIAvailable), "max_selection": .int(25)])
         case "list_changes": return try listChanges(arguments)
         case "get_stored_change": return try storedChange(arguments)
         case "preflight_rollback": return try preflightRollback(arguments)
@@ -140,11 +145,13 @@ public final class Broker: @unchecked Sendable {
         }
     }
     private func preflight(_ arguments: JSON) throws -> JSON {
-        let a = try Arguments(arguments, allowed: ["action", "scope", "calendar_id", "event_id", "fields"], required: ["action", "scope"])
+        let a = try Arguments(arguments, allowed: ["action", "scope", "calendar_id", "event_id", "fields", "cutoff"], required: ["action", "scope"])
         let action = try a.string("action")
         let scope = try a.string("scope")
+        if action == "delete", scope == "future" { return try preflightTermination(arguments) }
         if action == "modify", scope == "future" { return try preflightFuture(arguments) }
         if action == "modify", scope == "series" { return try preflightSeries(arguments) }
+        guard a.values["cutoff"] == nil else { throw CoreError("invalid_arguments", "A cutoff is only valid for future termination") }
         guard ["create", "modify", "delete"].contains(action), scope == "this" || (action == "create" && scope == "series") else { throw CoreError("unsupported_scope", "Create a series or address one individual event or occurrence") }
         let calendar: JSON; let before: JSON; let after: JSON
         if action == "create" {

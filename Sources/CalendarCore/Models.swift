@@ -143,6 +143,8 @@ public struct EventRecord: Equatable {
 }
 
 public protocol CalendarBackend: AnyObject {
+    func removeFuture(selected: EventRecord, originalAnchor: EventRecord, boundaryNow: () -> Date) throws -> FutureRemovalResult
+    func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord
     func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult
     func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord
     func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord
@@ -156,6 +158,8 @@ public protocol CalendarBackend: AnyObject {
 }
 
 public extension CalendarBackend {
+    func removeFuture(selected: EventRecord, originalAnchor: EventRecord, boundaryNow: () -> Date) throws -> FutureRemovalResult { throw CoreError("unsupported_scope", "Backend cannot terminate a future pattern") }
+    func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord { throw CoreError("unsupported_restore", "Backend cannot create an independent retained tail") }
     func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult { throw CoreError("unsupported_scope", "Backend cannot modify future pattern defaults") }
     func firstSeriesOccurrence(for selected: EventRecord) throws -> EventRecord { throw CoreError("unsupported_scope", "Backend cannot establish the current series first occurrence") }
     func applySeriesFields(anchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?) throws -> EventRecord { throw CoreError("unsupported_scope", "Backend cannot modify current series defaults") }
@@ -208,6 +212,42 @@ public final class SyntheticBackend: CalendarBackend {
         let first = candidates.filter { $0.occurrence == firstDate }
         guard first.count == 1 else { throw CoreError("identity_ambiguous", "Series first occurrence is ambiguous") }
         return first[0]
+    }
+    public func removeFuture(selected: EventRecord, originalAnchor: EventRecord, boundaryNow: () -> Date) throws -> FutureRemovalResult {
+        guard try get(nativeID: selected.nativeID, calendarID: selected.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start)) == selected,
+              try firstSeriesOccurrence(for: selected) == originalAnchor else { throw CoreError("stale_event", "Future boundary or first anchor changed") }
+        let boundary = try FuturePattern.validate(selected: selected, anchor: originalAnchor, now: boundaryNow())
+        _ = try FuturePattern.boundary(selected, now: boundaryNow())
+        writeCount += 1
+        events.removeAll { $0.nativeID == selected.nativeID && $0.calendarNativeID == selected.calendarNativeID && !$0.detached && ($0.occurrence.map { (try? parseDate($0)) ?? .distantPast } ?? .distantPast) >= boundary }
+        if originalAnchor.occurrence != selected.occurrence {
+            for index in events.indices where events[index].nativeID == selected.nativeID && !events[index].detached {
+                var details = events[index].details.object!, rules = details["recurrence_rules"]!.array!, rule = rules[0].object!
+                rule["end_date"] = .string(iso(boundary.addingTimeInterval(-0.001))); rule["occurrence_count"] = .int(0)
+                rules[0] = .object(rule); details["recurrence_rules"] = .array(rules); events[index].details = .object(details)
+            }
+        }
+        if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-remove failure") }
+        let past = originalAnchor.occurrence == selected.occurrence ? nil : try get(nativeID: originalAnchor.nativeID, calendarID: originalAnchor.calendarNativeID, occurrence: originalAnchor.occurrence, knownStart: parseDate(originalAnchor.fields.start))
+        return FutureRemovalResult(pastAnchor: past)
+    }
+    public func restoreFutureTail(calendarID: String, originalSelected: EventRecord, expectedPrefix: EventRecord?, fields: EventFields, details: JSON, availability: String) throws -> EventRecord {
+        guard let recurrence = fields.recurrence else { throw CoreError("unsupported_restore", "Retained tail recurrence is required") }
+        _ = try FutureTerminationPattern.validateRetainedFields(fields)
+        guard calendarID == originalSelected.calendarNativeID else { throw CoreError("stale_calendar", "Original calendar binding changed") }
+        do {
+            _ = try get(nativeID: originalSelected.nativeID, calendarID: calendarID, occurrence: originalSelected.occurrence, knownStart: parseDate(originalSelected.fields.start))
+            throw CoreError("stale_rollback", "Original boundary reappeared before independent creation")
+        } catch let error as CoreError where error.code == "event_missing" { }
+        if let expectedPrefix {
+            guard try get(nativeID: expectedPrefix.nativeID, calendarID: calendarID, occurrence: expectedPrefix.occurrence, knownStart: parseDate(expectedPrefix.fields.start)) == expectedPrefix else { throw CoreError("stale_rollback", "Original prefix changed immediately before independent creation") }
+        }
+        writeCount += 1
+        var snapshot = details.object!; snapshot["recurrence_rules"] = .array([recurrence.rawRule])
+        let saved = EventRecord(nativeID: UUID().uuidString, calendarNativeID: calendarID, occurrence: fields.start, fields: fields, recurring: true, availability: availability, details: .object(snapshot))
+        events.append(saved)
+        if throwAfterWrite { throw CoreError("synthetic_crash", "Synthetic injected post-create failure") }
+        return saved
     }
     public func applyFutureFields(selected: EventRecord, originalAnchor: EventRecord, fields: EventFields, changedFields: [String], restoredAlarms: JSON?, boundaryNow: () -> Date) throws -> FutureWriteResult {
         guard try get(nativeID: selected.nativeID, calendarID: selected.calendarNativeID, occurrence: selected.occurrence, knownStart: parseDate(selected.fields.start)) == selected,

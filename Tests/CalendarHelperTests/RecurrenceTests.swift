@@ -127,7 +127,7 @@ final class RecurrenceTests: XCTestCase {
         XCTAssertEqual(commit(broker, changed["result"]["preview"], action: "modify")["result"]["state"], .string("applied")); XCTAssertEqual(backend.events[1], second)
         // Future modification has a separate v5 contract; this count-ended source remains ineligible.
         XCTAssertNotEqual(draft(broker, id: id, action: "modify", fields: .object(["title": .string("Widen")]), scope: "future")["error"], .null)
-        XCTAssertEqual(draft(broker, id: id, action: "delete", scope: "future")["error"]["code"], .string("unsupported_scope"))
+        XCTAssertNotEqual(draft(broker, id: id, action: "delete", scope: "future")["error"], .null)
         XCTAssertEqual(draft(broker, id: id, action: "delete", scope: "series")["error"]["code"], .string("unsupported_scope"))
         let series = draft(broker, id: id, action: "modify", fields: .object(["title": .string("Series default")]), scope: "series")["result"]["preview"]
         XCTAssertEqual(series["envelope"]["version"], .int(4))

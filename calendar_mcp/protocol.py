@@ -5,7 +5,7 @@ import json
 from .json_values import validate_json
 from .native import (ALERTS_CAPABILITIES, NativeError, RECURRENCE_CAPABILITIES,
                      valid_future_modification_capabilities, valid_recovery_capabilities,
-                     valid_series_modification_capabilities)
+                     valid_series_modification_capabilities, valid_future_termination_capabilities)
 from .schema import RECOVERY_TOOLS, ValidationError, tools_for_capabilities, validate_arguments
 
 VERSIONS = ("2025-03-26", "2025-06-18", "2025-11-25")
@@ -17,6 +17,7 @@ SERIES_MODIFICATION_INSTRUCTIONS = " Current recurring pattern default fields ma
 
 
 FUTURE_MODIFICATION_INSTRUCTIONS = " Future default-field modification uses action modify, scope future, an exact opaque non-detached occurrence event_id and a nonempty subset of title, notes, plain location and alerts. It includes the selected occurrence and later instances in that current provider pattern. The exact selected start must be strictly after native now; never silently choose a later boundary. Only one supported unbounded or date-ended recurrence rule is accepted; count-ended and multiple-rule patterns are unsupported. Version-5 previews sign the complete selected before/after fields, original first anchor, exact inclusive boundary, sorted changed_fields and future_default_fields recovery limitations; expiry is capped at the selected start. EventKit may split the pattern and change provider identities/end metadata; earlier occurrence fields and times are outside the requested change. Detached overrides and exclusions remain provider-controlled and are not exhaustively verified. One future operation may affect an unbounded number of occurrences and consumes one modify intent. Submit the complete unchanged ordinary preview through commit_future_modify. Recovery selects exactly one original future source alone and submits the exact returned step through commit_future_rollback while that original boundary is still future; it reapplies retained masked defaults to the same verified segment without merging segments or reconstructing topology/identities. Recovery may become unavailable before retained details expire. Structural series changes and series deletion remain unsupported."
+FUTURE_TERMINATION_INSTRUCTIONS = " Stop the current provider pattern with action delete, scope future, event_id and cutoff, without fields. Cutoff must be either an inclusive exact YYYY-MM-DD date with an explicit named IANA time_zone or an at timestamp with explicit offset. Native selection signs the first eligible default occurrence at or after cutoff in a complete bounded 366-calendar-day window; it never silently skips an elapsed first candidate. The reference identifies the current pattern and need not be the chosen boundary. Known detached/moved candidates preceding that boundary require separate identified occurrence handling. The boundary must be strictly future at deletion; expiry is capped at it. A signed removes_entire_current_pattern flag discloses when the entire not-yet-started current pattern is removed. Other split segments, independent copies and potentially surviving detached/moved events are outside the deletion; this does not prove every event after cutoff is removed. Only rules that can be honestly copied by the supported typed constructor and default-phase checks are eligible. Version-6 previews sign complete cutoff, resolved boundary, reference/first-anchor/boundary snapshots, bounded selection window, typed copy rule and seven independent_tail_copy limitations. Submit the complete unchanged delete preview through commit_future_delete. Recovery selects exactly one original retained applied termination alone and creates a separate new recurring series through commit_future_restore with a separate exact preview and host write confirmation. It never merges the truncated prefix or restores exclusions/overrides; skipped dates may reappear, surviving detached/moved events may duplicate and dates now in the past may be recreated. Retained details, unchanged verified prefix/absence state and no conflicting later intent are required. Original delete quota is retained; recovery follows normal creation policy. A transport error remains uncertain: query get_change_status by the original nonce without retrying. Calendar-container deletion is permanently prohibited."
 
 
 def loads(data, *, max_depth=20):
@@ -53,11 +54,15 @@ class Protocol:
                   if self.recovery and capabilities["storage_version"] >= 3 and self.alerts and self.recurrence else None)
         self.series_modification = valid_series_modification_capabilities(series)
         future = (getattr(broker, "future_modification_capabilities", lambda: None)()
-                  if self.series_modification and capabilities["storage_version"] == 4 else None)
+                  if self.series_modification and capabilities["storage_version"] >= 4 else None)
         self.future_modification = valid_future_modification_capabilities(future)
+        termination = (getattr(broker, "future_termination_capabilities", lambda: None)()
+                       if self.future_modification and capabilities["storage_version"] == 5 else None)
+        self.future_termination = valid_future_termination_capabilities(termination)
         self.tools = [item for item in tools_for_capabilities(alerts=self.alerts, recurrence=self.recurrence,
                                                            series_modification=self.series_modification,
-                                                           future_modification=self.future_modification)
+                                                           future_modification=self.future_modification,
+                                                           future_termination=self.future_termination)
                       if self.recovery or item["name"] not in RECOVERY_TOOLS]
 
     def handle(self, request):
@@ -111,6 +116,14 @@ class Protocol:
                             "Date/time, timezone, all-day, recurrence, calendar moves, future scope and series deletion remain unsupported.",
                             "Date/time, timezone, all-day, recurrence, calendar moves and series deletion remain unsupported.")
                         result["instructions"] += FUTURE_MODIFICATION_INSTRUCTIONS
+                        if self.future_termination:
+                            result["instructions"] = result["instructions"].replace(
+                                "Recurrence-rule changes and whole-series deletion are unsupported.",
+                                "User-directed recurrence-rule changes and arbitrary whole-series deletion are unsupported.")
+                            result["instructions"] = result["instructions"].replace(
+                                "Structural series changes and series deletion remain unsupported.",
+                                "User-directed structural series edits and arbitrary whole-series deletion remain unsupported.")
+                            result["instructions"] += FUTURE_TERMINATION_INSTRUCTIONS
             else:
                 result["instructions"] += " Recurring creation, recurring occurrence deletion and version-3 previews require a verified recurrence-capable native helper."
         elif method == "ping":
@@ -166,10 +179,20 @@ class Protocol:
                     result = {"content": [{"type": "text", "text": json.dumps({"code": "feature_unavailable",
                                "message": "Future default-field modification requires verified native future, series, recurrence, alerts and storage-4 recovery capabilities; no request was dispatched"})}], "isError": True}
                     return {"jsonrpc": "2.0", "id": identifier, "result": result}
+            if not self.future_termination and isinstance(arguments, dict):
+                preview = arguments.get("preview")
+                envelope = preview.get("envelope") if isinstance(preview, dict) else None
+                if (name in ("commit_future_delete", "commit_future_restore")
+                        or (name == "preflight_change" and arguments.get("scope") == "future" and arguments.get("action") == "delete")
+                        or (name.startswith("commit_") and isinstance(envelope, dict) and envelope.get("version") == 6)):
+                    result = {"content": [{"type": "text", "text": json.dumps({"code": "feature_unavailable",
+                               "message": "Future termination and independent-copy recovery require verified storage-5 native capabilities; no request was dispatched"})}], "isError": True}
+                    return {"jsonrpc": "2.0", "id": identifier, "result": result}
             try:
                 validate_arguments(name, arguments, alerts=self.alerts, recurrence=self.recurrence,
                                    series_modification=self.series_modification,
-                                   future_modification=self.future_modification)
+                                   future_modification=self.future_modification,
+                                   future_termination=self.future_termination)
             except ValidationError as exc:
                 return error(identifier, -32602, str(exc))
             try:
