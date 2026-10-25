@@ -184,8 +184,12 @@ extension Broker {
                 guard key == "alarms" ? EventSnapshot.alarmsEquivalent(observed.details[key], existing.details[key]) : observed.details[key] == existing.details[key] else { throw CoreError("verification_failed", "Unrelated all-day details changed") }
             }
         } else {
+            // EventKit can wrap the assigned plain location without coordinates.
+            // Match only its exact native snapshot shape; retain the raw observation.
+            let location = observed.details["structured_location"]
+            let plainLocation: JSON = .object(["title": .string(fields.location), "radius": .string("0.0")])
             guard !observed.hasAttendees, !observed.hasOrganizer, observed.status != "cancelled",
-                  observed.details["url"] == .null, observed.details["structured_location"] == .null,
+                  observed.details["url"] == .null, location == .null || location == plainLocation,
                   observed.details["unsupported_external_alarm"] != .bool(true) else { throw CoreError("verification_failed", "Unexpected all-day creation metadata") }
         }
     }

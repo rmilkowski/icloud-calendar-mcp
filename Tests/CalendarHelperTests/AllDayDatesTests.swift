@@ -117,6 +117,92 @@ final class AllDayDatesTests: XCTestCase {
             try state.verifyAudit()
         }
     }
+    func testCreatePlainLocationWrappersRetainExactRawSnapshotsAndFingerprints() throws {
+        for location in ["", "Synthetic plain place"] {
+            for exclusive in [false, true] {
+                let state = try state(), backend = AllDayProbeBackend(), broker = Broker(state: state, backend: backend)
+                backend.base.allDayUsesExclusiveEnd = exclusive
+                let wrapper: JSON = .object(["title": .string(location), "radius": .string("0.0")])
+                backend.corrupt = { event, _ in
+                    var details = event.details.object!; details["structured_location"] = wrapper; event.details = .object(details)
+                }
+                let response = draft(broker, metadata: ["location": .string(location)]), result = commit(broker, response)
+                XCTAssertEqual(result["result"]["state"], .string("applied"), "\(result)")
+                let observed = try XCTUnwrap(backend.base.events.first), view = try broker.view(observed)
+                XCTAssertEqual(result["result"]["event"], view)
+                XCTAssertEqual(view["details"]["structured_location"], wrapper)
+                var absent = observed, details = observed.details.object!
+                details["structured_location"] = .null; absent.details = .object(details)
+                XCTAssertNotEqual(view["fingerprint"], try broker.view(absent)["fingerprint"])
+                let nonce = try XCTUnwrap(result["result"]["nonce"].string), stored = try XCTUnwrap(state.execution(nonce))
+                XCTAssertEqual(stored.payload, response["result"]["preview"]["envelope"])
+                XCTAssertEqual(stored.result, result["result"])
+                XCTAssertEqual(stored.result["event"]["details"]["structured_location"], wrapper)
+                XCTAssertEqual(commit(broker, response), result); XCTAssertEqual(backend.base.writeCount, 1)
+                try state.verifyAudit()
+            }
+        }
+    }
+    func testCreateRejectsEveryOtherStructuredLocationShapeAndReplaysUnknown() throws {
+        let location = "Synthetic plain place", plain: [String: JSON] = ["title": .string("Synthetic plain place"), "radius": .string("0.0")]
+        var invalid: [JSON] = [.object([:]), .array([]), .string(location)]
+        for (key, value): (String, JSON) in [("title", .string("Different")), ("title", .null), ("radius", .string("1.0")), ("radius", .string("0")), ("radius", .string("-0.0")), ("radius", .string(" 0.0")), ("radius", .int(0)), ("radius", .null), ("latitude", .string("0.0")), ("latitude", .null), ("longitude", .null), ("extra", .null)] {
+            var wrapper = plain; wrapper[key] = value; invalid.append(.object(wrapper))
+        }
+        for missing in ["title", "radius"] { var wrapper = plain; wrapper.removeValue(forKey: missing); invalid.append(.object(wrapper)) }
+        for wrapper in invalid {
+            let state = try state(), backend = AllDayProbeBackend(), broker = Broker(state: state, backend: backend)
+            backend.corrupt = { event, _ in
+                var details = event.details.object!; details["structured_location"] = wrapper; event.details = .object(details)
+            }
+            let response = draft(broker, metadata: ["location": .string(location)]), result = commit(broker, response)
+            XCTAssertEqual(result["result"]["state"], .string("unknown"), "\(wrapper): \(result)")
+            XCTAssertEqual(commit(broker, response), result); XCTAssertEqual(backend.base.writeCount, 1)
+            XCTAssertEqual(commit(broker, draft(broker))["error"]["code"], .string("unresolved_write"))
+            try state.verifyAudit()
+        }
+    }
+    func testHistoricalV7UnknownWithPlainWrapperRemainsUnknownAndBlocksRelatedWrites() throws {
+        let state = try state(), backend = SyntheticBackend(), broker = Broker(state: state, backend: backend)
+        let response = draft(broker), envelope = response["result"]["preview"]["envelope"], nonce = try XCTUnwrap(envelope["nonce"].string)
+        let (interval, fields) = try broker.validateAllDayEnvelope(envelope, rollback: false)
+        let sequence = try state.claim(nonce: nonce, payload: envelope, now: Date())
+        _ = try backend.applyAllDay(calendarID: "synthetic-calendar", existing: nil, fields: fields, interval: interval, restoredAlarms: nil)
+        var details = backend.events[0].details.object!
+        details["structured_location"] = .object(["title": .string(""), "radius": .string("0.0")]); backend.events[0].details = .object(details)
+        let historical: JSON = .object(["nonce": .string(nonce), "state": .string("unknown"), "action": .string("create"), "audit_sequence": .int(sequence), "message": .string("Retained synthetic historical verification failure")])
+        try state.finish(nonce: nonce, state: "unknown", result: historical, event: "write_unknown")
+        let tables = ["executions", "execution_details", "execution_keys", "write_safety_claims", "audit", "recovery_links"]
+        let proof = try Dictionary(uniqueKeysWithValues: tables.map { ($0, try state.rows("SELECT * FROM " + $0 + " ORDER BY rowid")) })
+        XCTAssertEqual(commit(broker, response)["result"], historical)
+        XCTAssertEqual(commit(broker, draft(broker))["error"]["code"], .string("unresolved_write"))
+        XCTAssertEqual(backend.writeCount, 1)
+        for table in tables { XCTAssertEqual(try state.rows("SELECT * FROM " + table + " ORDER BY rowid"), proof[table]) }
+        XCTAssertEqual(try state.execution(nonce)?.payload, envelope)
+        XCTAssertEqual(try state.execution(nonce)?.result, historical)
+        try state.verifyAudit()
+    }
+    func testModifyAndInverseStillRequireExactStructuredLocationPreservation() throws {
+        for inverse in [false, true] {
+            let state = try state(), backend = AllDayProbeBackend(try fixture()), broker = Broker(state: state, backend: backend)
+            let response = draft(broker, id: try id(broker))
+            let target: JSON
+            if inverse {
+                let applied = commit(broker, response, action: "modify")
+                XCTAssertEqual(applied["result"]["state"], .string("applied"))
+                target = try XCTUnwrap(undoDraft(broker, applied["result"]["nonce"])["result"]["steps"].array?.first?["preview"])
+            } else { target = response["result"]["preview"] }
+            backend.corrupt = { event, _ in
+                var details = event.details.object!; details["structured_location"] = .null; event.details = .object(details)
+            }
+            let operation = inverse ? "commit_rollback" : "commit_modify"
+            let result = call(broker, operation, ["preview": target])
+            XCTAssertEqual(result["result"]["state"], .string("unknown"))
+            XCTAssertEqual(call(broker, operation, ["preview": target]), result)
+            XCTAssertEqual(backend.base.writeCount, inverse ? 2 : 1)
+            try state.verifyAudit()
+        }
+    }
     func testNamedTimestampCreateUpgradesToV7AndRecurringCreateFailsBeforeIntent() throws {
         let state = try state(), backend = SyntheticBackend(), broker = Broker(state: state, backend: backend)
         let calendar = call(broker, "list_calendars")["result"]["calendars"].array!.first!["id"]
