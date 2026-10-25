@@ -387,12 +387,49 @@ ALL_DAY_PREVIEWS = {name: obj({"envelope": envelope, "authentication_tag": strin
     ("commit_rollback", ALL_DAY_ROLLBACK_ENVELOPE))}
 
 
+RECONCILIATION_LIMITATIONS = [
+    "This records a user assessment of the earlier outcome; it is not native provider verification or proof of a fresh human confirmation.",
+    "This changes only the integration journal. It does not change Calendar data, retry the earlier operation, or compensate for it.",
+    "The original nonce, unknown result and quota charges remain retained under existing retention rules. Resolution may unblock related changes but does not make this execution eligible for automatic rollback."]
+RECONCILIATION_ASSESSMENT = obj({"outcome": string(enum=["applied", "not_applied"]),
+                                "evidence": string(2000, minLength=1)}, ("outcome", "evidence"))
+# These are complete retained historical envelopes/results, including legacy forms.
+# Native authentication and exact source comparison own their opaque interior.
+RETAINED_JOURNAL_OBJECT = {"type": "object", "properties": {}, "required": [], "additionalProperties": True}
+RECONCILIATION_SOURCE = obj({"change_id": IDENTITY, "payload_digest": string(64, minLength=64),
+    "result_digest": string(64, minLength=64), "payload": RETAINED_JOURNAL_OBJECT,
+    "result": RETAINED_JOURNAL_OBJECT}, ("change_id", "payload_digest", "result_digest", "payload", "result"))
+RECONCILIATION_ENVELOPE = obj({"version": {"type": "integer", "enum": [1]},
+    "kind": string(enum=["journal_reconciliation"]), "action": string(enum=["reconcile"]),
+    "nonce": IDENTITY, "issued_at": STAMP, "expires_at": STAMP, "installation_id": IDENTITY,
+    "credential_generation": IDENTITY, "key_id": IDENTITY, "source": RECONCILIATION_SOURCE,
+    "assessment": RECONCILIATION_ASSESSMENT,
+    "limitations": {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": True,
+                    "items": string(2000, enum=RECONCILIATION_LIMITATIONS)}},
+    ("version", "kind", "action", "nonce", "issued_at", "expires_at", "installation_id",
+     "credential_generation", "key_id", "source", "assessment", "limitations"))
+RECONCILIATION_PREVIEW = obj({"envelope": RECONCILIATION_ENVELOPE,
+                             "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+RECONCILIATION_TOOLS = [
+    tool("list_unresolved_changes", "List minimal integration journal records with unknown outcomes, including creation and recovery executions. Follow next_cursor until null. Resolved records may disappear between pages; this is not an immutable inventory. Inspect a selected record with get_stored_change before assessing its outcome. No Calendar access occurs.",
+         obj({"limit": {"type": "integer", "minimum": 1, "maximum": 100}, "cursor": string(4096, minLength=1)})),
+    tool("preflight_reconciliation", "Prepare a stateless authenticated journal assessment of one retained unknown execution. Record the user's explicit applied or not_applied assessment and supporting evidence after inspecting get_stored_change. This performs no provider verification or Calendar access and creates no pending workflow. Review the full original payload, unknown result, assessment and three signed limitations; send the exact preview through commit_reconciliation under host write confirmation.",
+         obj({"change_id": IDENTITY, **RECONCILIATION_ASSESSMENT["properties"]}, ("change_id", "outcome", "evidence"))),
+    tool("commit_reconciliation", "Record only the exact user assessment in this complete native-authenticated journal preview under the host approval policy. No Calendar data changes, retries or compensation occur, and no provider verification or fresh human click is proved. Original nonce, unknown result and quota charges are retained under existing retention rules. Resolution may unblock related changes but never enables automatic rollback. An identical authenticated preview replays its durable receipt, including after expiry; never substitute source, assessment or limitations. If transport is uncertain, replay this exact authenticated preview for its receipt; get_change_status uses the original source change_id, not the reconciliation nonce, which is not a Calendar execution nonce. Do not create a fresh assessment or retry Calendar data.",
+         obj({"preview": RECONCILIATION_PREVIEW}, ("preview",)), write=True, destructive=True)]
+for _tool in RECONCILIATION_TOOLS:
+    _tool["annotations"]["idempotentHint"] = True
+RECONCILIATION_TOOL_NAMES = frozenset(item["name"] for item in RECONCILIATION_TOOLS)
+
+
 def tools_for_capabilities(*, alerts, recurrence=False, series_modification=False, future_modification=False,
-                           future_termination=False, all_day_dates=False):
+                           future_termination=False, all_day_dates=False, reconciliation=False):
     base = (FUTURE_TERMINATION_TOOLS if future_termination and future_modification and series_modification and recurrence and alerts else
             FUTURE_MODIFICATION_TOOLS if future_modification and series_modification and recurrence and alerts else
             SERIES_MODIFICATION_TOOLS if series_modification and recurrence and alerts else
             RECURRENCE_TOOLS if recurrence and alerts else TOOLS if alerts else LEGACY_TOOLS)
+    if reconciliation:
+        base = [*base, *RECONCILIATION_TOOLS]
     if not all_day_dates or not alerts:
         return base
     result = deepcopy(base)
@@ -485,14 +522,21 @@ def validate(value, schema, path="arguments", depth=0):
 
 
 def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series_modification=False,
-                       future_modification=False, future_termination=False, all_day_dates=False):
+                       future_modification=False, future_termination=False, all_day_dates=False, reconciliation=False):
     tools = {item["name"]: item for item in tools_for_capabilities(alerts=alerts, recurrence=recurrence,
                                                                series_modification=series_modification,
                                                                future_modification=future_modification,
-                                                               future_termination=future_termination, all_day_dates=all_day_dates)}
+                                                               future_termination=future_termination, all_day_dates=all_day_dates,
+                                                               reconciliation=reconciliation)}
     if name not in tools:
         raise ValidationError("Unknown tool")
     validate(arguments, tools[name]["inputSchema"])
+    if name == "preflight_reconciliation" and not arguments["evidence"].strip():
+        raise ValidationError("Assessment evidence must not be blank")
+    if name == "commit_reconciliation":
+        envelope = arguments["preview"]["envelope"]
+        if envelope["limitations"] != RECONCILIATION_LIMITATIONS or not envelope["assessment"]["evidence"].strip():
+            raise ValidationError("Journal assessment requires exact signed limitations and nonblank evidence")
     if name == "preflight_change":
         action = arguments["action"]
         fields = arguments.get("fields")
@@ -538,7 +582,7 @@ def validate_arguments(name, arguments, *, alerts=True, recurrence=False, series
                 if key in normalized:
                     raise ValidationError("Alerts must not contain duplicate triggers")
                 normalized.append(key)
-    if (name.startswith("commit_") and name not in ("commit_rollback", "commit_series_rollback", "commit_future_rollback")
+    if (name.startswith("commit_") and name not in ("commit_rollback", "commit_series_rollback", "commit_future_rollback", "commit_reconciliation")
             and arguments["preview"]["envelope"]["action"] != (
                 "modify" if name in ("commit_series_modify", "commit_future_modify") else
                 "delete" if name == "commit_future_delete" else "create" if name == "commit_future_restore" else name.removeprefix("commit_"))):

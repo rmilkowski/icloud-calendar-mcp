@@ -46,6 +46,19 @@ ALL_DAY_DATES_CAPABILITIES = {
     "recurring_structural_changes": False, "commit_tools": ["commit_create", "commit_modify", "commit_rollback"]}
 
 
+RECONCILIATION_CAPABILITIES = {
+    "version": 1, "storage_version": 6, "preview_version": 1, "kind": "journal_reconciliation",
+    "user_assessment": True, "automatic_verification": False, "calendar_mutation": False,
+    "outcomes": ["applied", "not_applied"], "max_evidence_length": 2000,
+    "commit_tools": ["commit_reconciliation"]}
+
+
+def valid_reconciliation_capabilities(value):
+    return (isinstance(value, dict) and value == RECONCILIATION_CAPABILITIES
+            and all(type(value[key]) is type(expected) for key, expected in RECONCILIATION_CAPABILITIES.items())
+            and all(type(item) is str for key in ("outcomes", "commit_tools") for item in value[key]))
+
+
 def valid_all_day_dates_capabilities(value):
     return (isinstance(value, dict) and value == ALL_DAY_DATES_CAPABILITIES
             and all(type(value[key]) is type(expected) for key, expected in ALL_DAY_DATES_CAPABILITIES.items())
@@ -240,6 +253,19 @@ class NativeBroker:
             if valid_all_day_dates_capabilities(result):
                 self._all_day_dates_capabilities = result
         return self._all_day_dates_capabilities
+
+    def reconciliation_capabilities(self):
+        """Independent metadata-only journal assessment contract."""
+        if not getattr(self, "_reconciliation_capabilities_checked", False):
+            self._reconciliation_capabilities_checked = True
+            self._reconciliation_capabilities = None
+            try:
+                result = self.call("reconciliation_capabilities", {})
+            except (NativeError, ValueError, OSError):
+                return None
+            if valid_reconciliation_capabilities(result):
+                self._reconciliation_capabilities = result
+        return self._reconciliation_capabilities
 
     def _wait_io(self, readers, writers, deadline):
         while True:

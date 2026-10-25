@@ -146,7 +146,7 @@ class NativeCivilDateTests(unittest.TestCase):
             broker=NativeBroker(HELPER,Path(directory)/"native","synthetic",credential_binding=hashlib.sha256(b"civil-fixture").hexdigest())
             self.addCleanup(broker.close)
             if broker.all_day_dates_capabilities() is None: self.skipTest("Selected helper lacks civil-date support")
-            protocol=Protocol(broker);self.assertEqual(len(protocol.tools),19)
+            protocol=Protocol(broker);self.assertEqual(len(protocol.tools),22 if protocol.reconciliation else 19)
             def tool(name,args=None):
                 reply=protocol.handle(request(name,args));self.assertNotIn("error",reply,reply)
                 self.assertFalse(reply["result"]["isError"],reply);return reply["result"]["structuredContent"]

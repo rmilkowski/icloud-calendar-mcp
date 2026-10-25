@@ -107,7 +107,7 @@ class NativeIntegrationTests(unittest.TestCase):
                 self.assertEqual(broker.recovery_capabilities(), capabilities)
                 protocol = Protocol(broker)
                 tools = protocol.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
-                self.assertEqual(len(tools), 19 if protocol.future_termination else 17 if protocol.future_modification else 15 if protocol.series_modification else 13)
+                self.assertEqual(len(tools), 22 if protocol.reconciliation else 19 if protocol.future_termination else 17 if protocol.future_modification else 15 if protocol.series_modification else 13)
                 result = protocol.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "list_changes"}})
                 self.assertFalse(result["result"]["isError"])
                 self.assertEqual(result["result"]["structuredContent"]["changes"], [])

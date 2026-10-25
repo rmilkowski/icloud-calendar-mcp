@@ -247,7 +247,7 @@ class NativeSeriesModificationIntegrationTests(unittest.TestCase):
             if broker.series_modification_capabilities() is None:
                 self.skipTest("Selected helper does not support current-series default-field modification")
             protocol = Protocol(broker)
-            self.assertEqual(len(protocol.tools), 19 if protocol.future_termination else 17 if protocol.future_modification else 15)
+            self.assertEqual(len(protocol.tools), 22 if protocol.reconciliation else 19 if protocol.future_termination else 17 if protocol.future_modification else 15)
 
             def tool(name, arguments=None, *, error=False):
                 reply = protocol.handle(request(name, arguments))

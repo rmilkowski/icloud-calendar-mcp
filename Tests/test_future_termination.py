@@ -271,7 +271,7 @@ class NativeFutureTerminationIntegrationTests(unittest.TestCase):
             if broker.future_termination_capabilities() is None:
                 self.skipTest("Selected helper does not support future termination")
             protocol = Protocol(broker)
-            self.assertEqual(len(protocol.tools), 19)
+            self.assertEqual(len(protocol.tools), 22 if protocol.reconciliation else 19)
             def tool(name, arguments=None, *, error=False):
                 reply = protocol.handle(request(name, arguments))
                 self.assertNotIn("error", reply, reply)

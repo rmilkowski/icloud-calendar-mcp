@@ -52,6 +52,7 @@ public final class StateStore {
         try installCommitObservationStorage()
         try execute("CREATE INDEX IF NOT EXISTS executions_state ON executions(state)")
         try migrateRecoveryStorage()
+        try installReconciliationStorage()
         try verifyAudit()
         try transaction {
             // Earlier native executions are part of the same installation budget.

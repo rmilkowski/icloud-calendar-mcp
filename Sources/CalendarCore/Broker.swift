@@ -48,6 +48,12 @@ public final class Broker: @unchecked Sendable {
     }
     private func perform(_ op: String, arguments: JSON) throws -> JSON {
         switch op {
+        case "reconciliation_capabilities":
+            _ = try Arguments(arguments, allowed: [])
+            return Self.reconciliationCapabilities
+        case "list_unresolved_changes": return try listUnresolvedChanges(arguments)
+        case "preflight_reconciliation": return try preflightReconciliation(arguments)
+        case "commit_reconciliation": return try commitReconciliation(arguments)
         case "all_day_dates_capabilities":
             _ = try Arguments(arguments, allowed: [])
             return Self.allDayDatesCapabilities

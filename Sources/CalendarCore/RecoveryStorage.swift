@@ -84,7 +84,7 @@ extension StateStore {
     func safeAuditPayload(event: String, nonce: String?, payload: JSON) -> JSON {
         if event.hasPrefix("write_safety_") || event.contains("credential") || event == "recovery_migration_checkpoint" || event == "details_expired" || event == "commit_observation_checkpoint" { return payload }
         var result: [String: JSON] = [:]
-        for key in ["storage_version", "state", "action", "audit_sequence", "code", "op", "outcome", "rollback_of", "event_id", "parent_nonce", "stopped_reason"] where payload[key] != .null { result[key] = payload[key] }
+        for key in ["storage_version", "state", "action", "audit_sequence", "code", "op", "outcome", "rollback_of", "event_id", "parent_nonce", "stopped_reason", "resolution_source", "verification", "reconciliation_nonce"] where payload[key] != .null { result[key] = payload[key] }
         if let nonce { result["detail_reference"] = .string(nonce) }
         if let data = try? payload.data() { result["detail_digest"] = .string(digest(data)) }
         return .object(result)
