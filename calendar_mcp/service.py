@@ -26,6 +26,7 @@ import time
 
 from .adapter import GatewayClient
 from .launch_services import bundle_for_helper
+from .protocol import loads
 from .security import DEFAULT_STATE, private_directory
 
 GATEWAY = "local.calendar-mcp.gateway"
@@ -110,7 +111,7 @@ def load_config(state):
     config = json.loads(_read(directory / "config.json"))
     keys = {"version", "repo", "python", "helper", "state", "port", "backend", "tunnel_client",
             "tunnel_id", "tunnel_env", "profile_dir", "alias", "profile", "notify"}
-    if (not isinstance(config, dict) or set(config) - {"enable_reminders"} != keys or config["version"] != 1
+    if (not isinstance(config, dict) or set(config) - {"enable_reminders", "reminders_tunnel"} != keys or config["version"] != 1
             or ("enable_reminders" in config and type(config["enable_reminders"]) is not bool)):
         raise ValueError("Invalid service config")
     if (type(config["port"]) is not int or not 1 <= config["port"] <= 65535
@@ -126,7 +127,67 @@ def load_config(state):
             raise ValueError("Invalid tunnel alias/profile")
     if not isinstance(config["tunnel_id"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", config["tunnel_id"]):
         raise ValueError("Set the existing tunnel ID locally")
+    if "reminders_tunnel" in config:
+        reminder = config["reminders_tunnel"]
+        if (config.get("enable_reminders") is not True or not isinstance(reminder, dict)
+                or set(reminder) != {"tunnel_id", "tunnel_env", "profile_dir", "alias", "profile"}):
+            raise ValueError("Invalid Reminders tunnel config")
+        for key in ("tunnel_env", "profile_dir"):
+            if not isinstance(reminder[key], str) or not Path(reminder[key]).is_absolute():
+                raise ValueError("Reminders tunnel paths must be absolute")
+        for key in ("alias", "profile"):
+            if not isinstance(reminder[key], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", reminder[key]):
+                raise ValueError("Invalid Reminders tunnel alias/profile")
+        if not isinstance(reminder["tunnel_id"], str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", reminder["tunnel_id"]):
+            raise ValueError("Invalid Reminders tunnel ID")
+        if any(reminder[key] == config[key] for key in ("tunnel_id", "alias")):
+            raise ValueError("Calendar and Reminders tunnels require distinct ownership")
+        if Path(reminder["profile_dir"]).resolve() == Path(config["profile_dir"]).resolve():
+            raise ValueError("Calendar and Reminders tunnels require distinct ownership")
     return config
+
+
+def managed_tunnels(config):
+    """Fixed components; configuration cannot introduce a resource name."""
+    return ("tunnel", "reminders_tunnel") if "reminders_tunnel" in config else ("tunnel",)
+
+
+def tunnel_config(config, component):
+    if component not in managed_tunnels(config):
+        raise ValueError("Unmanaged tunnel component")
+    return config if component == "tunnel" else {**config, **config["reminders_tunnel"]}
+
+
+def adapter_command(config, component):
+    command = [config["python"], "-m", "calendar_mcp", "stdio", "--state-dir", config["state"],
+               "--port", str(config["port"])]
+    return command + (["--resource", "reminders"] if component == "reminders_tunnel" else [])
+
+
+def fixed_profile_target(config, component):
+    """Inspect only the protected official managed-profile JSON representation.
+
+    v0.0.17 runtimes writes JSON to <profile>.yaml. Other YAML dialects,
+    duplicate keys, extra targets and alternate transports fail closed.
+    """
+    directory = Path(config["profile_dir"])
+    info = directory.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ValueError("Reminders tunnel profile directory must be private")
+    value = loads(_read(directory / (config["profile"] + ".yaml")))
+    if not isinstance(value, dict) or type(value.get("config_version")) is not int or value["config_version"] != 1:
+        return False
+    control = value.get("control_plane")
+    mcp = value.get("mcp")
+    if (not isinstance(control, dict) or control.get("tunnel_id") != config["tunnel_id"]
+            or not isinstance(mcp, dict) or set(mcp) != {"commands"}
+            or not isinstance(mcp["commands"], list) or len(mcp["commands"]) != 1):
+        return False
+    target = mcp["commands"][0]
+    return (isinstance(target, dict) and set(target) == {"channel", "command"}
+            and target["channel"] == "main" and isinstance(target["command"], str)
+            and target["command"] == shlex.join(adapter_command(config, component)))
 
 
 def runtime_environment(path):
@@ -227,6 +288,17 @@ def render(args):
               "alias": args.alias, "profile": args.profile, "notify": not args.no_notify}
     if getattr(args, "enable_reminders", False):
         config["enable_reminders"] = True
+    reminder_args = [getattr(args, "reminders_" + key, None) for key in
+                     ("tunnel_id", "tunnel_env", "profile_dir", "alias", "profile")]
+    if any(value is not None for value in reminder_args):
+        if not all(value is not None for value in reminder_args) or not config.get("enable_reminders"):
+            raise ValueError("All Reminders tunnel options and --enable-reminders are required")
+        config["reminders_tunnel"] = dict(zip(
+            ("tunnel_id", "tunnel_env", "profile_dir", "alias", "profile"), reminder_args))
+        config["reminders_tunnel"]["tunnel_env"] = str(args.reminders_tunnel_env.expanduser().absolute())
+        config["reminders_tunnel"]["profile_dir"] = _absolute(args.reminders_profile_dir)
+    if (directory / "monitor-state.json").exists():
+        validate_monitor_state(json.loads(_read(directory / "monitor-state.json")))
     bundle_for_helper(config["helper"])
     _json_write(directory / "config.json", config)
     config = load_config(args.state_dir)
@@ -284,26 +356,29 @@ class System:
         except (OSError, ValueError, http.client.HTTPException):
             return "indeterminate"
 
-    def tunnel(self):
+    def tunnel(self, component="tunnel"):
+        config = tunnel_config(self.config, component)
         try:
-            code, output = self.run([self.config["tunnel_client"], "runtimes", "status", self.config["alias"], "--json"])
+            code, output = self.run([config["tunnel_client"], "runtimes", "status", config["alias"], "--json"])
             if code:
                 return "indeterminate"
             value = json.loads(output)
-            if not isinstance(value, dict) or any(value.get(remote) != self.config[local] for remote, local in
+            if not isinstance(value, dict) or any(value.get(remote) != config[local] for remote, local in
                     (("alias", "alias"), ("tunnel_id", "tunnel_id"), ("profile_name", "profile"), ("profile_dir", "profile_dir"))):
+                return "ownership_conflict"
+            if component == "reminders_tunnel" and not fixed_profile_target(config, component):
                 return "ownership_conflict"
             return tunnel_health(value)
         except (OSError, ValueError, TimeoutError):
-            return "indeterminate"
+            return "ownership_conflict" if component == "reminders_tunnel" else "indeterminate"
 
     def recover(self, component):
         if component == "gateway":
             # Never kill a responsive busy/indeterminate broker. The monitor
             # invokes this only for confirmed absence or failed native channel.
             return self.run(["/bin/launchctl", "kickstart", "-k", self.domain + "/" + GATEWAY])[0] == 0
-        config = self.config
-        if self.tunnel() not in ("down", "unhealthy"):
+        config = tunnel_config(self.config, component)
+        if self.tunnel(component) not in ("down", "unhealthy"):
             return False
         code, _ = self.run([config["tunnel_client"], "runtimes", "stop", config["alias"]])
         if code:
@@ -311,8 +386,7 @@ class System:
         command = [config["tunnel_client"], "runtimes", "connect", "--alias", config["alias"],
                    "--profile", config["profile"], "--profile-dir", config["profile_dir"],
                    "--runtime-api-key", "env:CONTROL_PLANE_API_KEY", "--tunnel-id", config["tunnel_id"],
-                   "--mcp-command", shlex.join([config["python"], "-m", "calendar_mcp", "stdio",
-                    "--state-dir", config["state"], "--port", str(config["port"])])]
+                   "--mcp-command", shlex.join(adapter_command(config, component))]
         return self.run(command, timeout=30, extra_env=runtime_environment(config["tunnel_env"]))[0] == 0
 
     def notify(self, component, event):
@@ -377,7 +451,9 @@ def check(config, directory, system, now):
     session = getattr(system, "session", lambda: None)()
     if session is not None and session != state.get("session"):
         state.update(session=session, episode_started=now, tunnel_start_pending=True, tunnel_start_attempted=False)
-        for item in state["components"].values():
+        for component, item in state["components"].items():
+            if component == "reminders_tunnel":
+                item.update(start_pending=True, start_attempted=False, episode_started=now)
             item["failures"] = 0
             item.pop("healthy_since", None)
         # New GUI/boot episodes reset observations, never the durable budget,
@@ -385,14 +461,22 @@ def check(config, directory, system, now):
         _json_write(path, state)
     gateway = system.gateway()
     observations = {"gateway": gateway, "tunnel": system.tunnel()}
+    if "reminders_tunnel" in config:
+        observations["reminders_tunnel"] = system.tunnel("reminders_tunnel")
     for component, health in observations.items():
         item = state["components"].setdefault(component, {"failures": 0, "attempts": [], "next": 0, "incident": None})
         item.setdefault("backoff", 0)
+        if component == "reminders_tunnel" and "episode_started" not in item:
+            item.update(episode_started=now, start_pending=session is not None, start_attempted=False)
+        is_tunnel = component in managed_tunnels(config)
+        dependency_ready = gateway == "healthy" or (component == "reminders_tunnel" and gateway == "permission")
         # Future timestamps remain consumed after wall-clock rollback.
         item["attempts"] = [stamp for stamp in item["attempts"] if now - stamp < 3600]
         if health == "healthy":
             if component == "tunnel":
                 state["tunnel_start_pending"] = False
+            elif component == "reminders_tunnel":
+                item["start_pending"] = False
             item["healthy_since"] = item.get("healthy_since", now)
             if item["incident"] is not None and now - item["healthy_since"] >= GRACE:
                 item["incident"] = None
@@ -408,17 +492,19 @@ def check(config, directory, system, now):
         else:
             item.pop("healthy_since", None)
             item["failures"] += 1
-            if item["failures"] < 3 or now - state.get("episode_started", state["started"]) < GRACE or now < item["next"]:
+            if item["failures"] < 3 or now - (item.get("episode_started", state.get("episode_started", state["started"]))) < GRACE or now < item["next"]:
                 continue
-            startup = (component == "tunnel" and session is not None and session == state.get("session")
-                       and state.get("tunnel_start_pending") is True and state.get("tunnel_start_attempted") is False
-                       and health == "down" and gateway == "healthy" and len(item["attempts"]) < BUDGET)
+            pending = state.get("tunnel_start_pending") if component == "tunnel" else item.get("start_pending")
+            attempted = state.get("tunnel_start_attempted") if component == "tunnel" else item.get("start_attempted")
+            startup = (is_tunnel and session is not None and session == state.get("session")
+                       and pending is True and attempted is False
+                       and health == "down" and dependency_ready and len(item["attempts"]) < BUDGET)
             if item["incident"] is None and not startup:
                 item["incident"] = health
                 _json_write(path, state)
                 _event(directory, system, component, health, now)
             eligible = health in ("down", "native_unavailable", "unhealthy", "timeout")
-            if component == "tunnel" and gateway != "healthy":
+            if is_tunnel and not dependency_ready:
                 eligible = False
             if not eligible or len(item["attempts"]) >= BUDGET:
                 continue
@@ -428,7 +514,10 @@ def check(config, directory, system, now):
             item["next"] = now + max(GRACE, min(900, 60 * 2 ** item["backoff"]))
             item["backoff"] = min(4, item["backoff"] + 1)
             if startup:
-                state["tunnel_start_attempted"] = True
+                if component == "tunnel":
+                    state["tunnel_start_attempted"] = True
+                else:
+                    item["start_attempted"] = True
             _json_write(path, state)
             if startup:
                 _event(directory, system, component, "startup_requested", now, notify=False)
@@ -447,13 +536,17 @@ def validate_monitor_state(state):
     def stamp(value):
         return type(value) in (int, float) and math.isfinite(value) and value >= 0
     if (not isinstance(state, dict) or state.get("version") != 1 or not stamp(state.get("started"))
-            or not isinstance(state.get("components"), dict) or not set(state["components"]) <= {"gateway", "tunnel"}):
+            or not isinstance(state.get("components"), dict) or not set(state["components"]) <= {"gateway", "tunnel", "reminders_tunnel"}):
         raise ValueError("Invalid monitor state")
     if (any(key in state and type(state[key]) is not bool for key in ("tunnel_start_pending", "tunnel_start_attempted"))
             or ("episode_started" in state and not stamp(state["episode_started"]))
             or ("session" in state and (not isinstance(state["session"], str) or not re.fullmatch(r"[a-f0-9]{64}", state["session"])))):
         raise ValueError("Invalid monitor episode state")
-    for value in state["components"].values():
+    for component, value in state["components"].items():
+        if component == "reminders_tunnel" and isinstance(value, dict):
+            if (any(key in value and type(value[key]) is not bool for key in ("start_pending", "start_attempted"))
+                    or ("episode_started" in value and not stamp(value["episode_started"]))):
+                raise ValueError("Invalid Reminders tunnel episode state")
         if (not isinstance(value, dict) or type(value.get("failures")) is not int or value["failures"] < 0
                 or not isinstance(value.get("attempts"), list) or len(value["attempts"]) > BUDGET
                 or not all(stamp(t) for t in value["attempts"]) or not stamp(value.get("next"))
@@ -505,7 +598,8 @@ def install(state, *, system=None):
     if (directory / "installed.json").exists():
         raise ValueError("Service is already installed")
     # Explicit cutover is required; an installer never adopts a live process.
-    if actual.gateway() != "down" or actual.tunnel() != "down":
+    if actual.gateway() != "down" or any((actual.tunnel() if c == "tunnel" else actual.tunnel(c)) != "down"
+                                        for c in managed_tunnels(config)):
         raise ValueError("Stop the existing gateway and managed tunnel before service installation")
     for label in (GATEWAY, MONITOR):
         if actual.launch("print", label):
@@ -516,6 +610,9 @@ def install(state, *, system=None):
     agents.mkdir(mode=0o700, parents=True, exist_ok=True)
     if agents.is_symlink() or agents.stat().st_uid != os.getuid():
         raise ValueError("Unsafe LaunchAgents directory")
+    monitor_path = directory / "monitor-state.json"
+    if monitor_path.exists():
+        validate_monitor_state(json.loads(_read(monitor_path)))
     installed_paths = []
     try:
         for label in (GATEWAY, MONITOR):
@@ -530,7 +627,8 @@ def install(state, *, system=None):
                 _write(directory / name, b"")
             _read(directory / name, 1024 * 1024)
         _json_write(directory / "installed.json", _ownership(config))
-        _json_write(directory / "monitor-state.json", {"version": 1, "started": time.time(), "components": {}})
+        if not monitor_path.exists():
+            _json_write(monitor_path, {"version": 1, "started": time.time(), "components": {}})
         for destination in installed_paths:
             if actual.run(["/bin/launchctl", "bootstrap", actual.domain, str(destination)])[0]:
                 raise ValueError("Service registration failed")
@@ -568,10 +666,15 @@ def uninstall(state, *, system=None):
     # Stop monitor before removing the gateway or its managed tunnel.
     if not actual.launch("bootout", MONITOR) and actual.launch("print", MONITOR):
         raise ValueError("Monitor could not be stopped")
-    if actual.tunnel() not in ("down", "healthy", "unhealthy"):
-        raise ValueError("Tunnel ownership or status uncertain; stop safely before uninstalling")
-    if actual.run([config["tunnel_client"], "runtimes", "stop", config["alias"]])[0]:
-        raise ValueError("Managed tunnel could not be stopped")
+    # Validate ownership of every runtime before stopping any runtime.
+    for component in managed_tunnels(config):
+        health = actual.tunnel() if component == "tunnel" else actual.tunnel(component)
+        if health not in ("down", "healthy", "unhealthy"):
+            raise ValueError("Tunnel ownership or status uncertain; stop safely before uninstalling")
+    for component in reversed(managed_tunnels(config)):
+        tunnel = tunnel_config(config, component)
+        if actual.run([config["tunnel_client"], "runtimes", "stop", tunnel["alias"]])[0]:
+            raise ValueError("Managed tunnel could not be stopped")
     if not actual.launch("bootout", GATEWAY) and actual.launch("print", GATEWAY):
         raise ValueError("Gateway could not be stopped")
     for label in (MONITOR, GATEWAY):
@@ -597,6 +700,8 @@ def status(state):
         actual = System(config)
         result.update(gateway_registered=actual.launch("print", GATEWAY), monitor_registered=actual.launch("print", MONITOR),
                       gateway=actual.gateway(), tunnel=actual.tunnel())
+        if "reminders_tunnel" in config:
+            result["reminders_tunnel"] = actual.tunnel("reminders_tunnel")
         result["active"] = result["gateway_registered"] and result["monitor_registered"]
         if (directory / "monitor-state.json").exists():
             saved = json.loads(_read(directory / "monitor-state.json"))
@@ -626,6 +731,10 @@ def add_parser(sub):
             item.add_argument("--profile", default="calendar-studio")
             item.add_argument("--port", type=int, default=18765)
             item.add_argument("--no-notify", action="store_true")
+            for name in ("tunnel-id", "alias", "profile"):
+                item.add_argument("--reminders-" + name)
+            for name in ("tunnel-env", "profile-dir"):
+                item.add_argument("--reminders-" + name, type=Path)
             item.add_argument("--enable-reminders", action="store_true", help="Opt in to Reminders for the rendered gateway; no OS permission request")
 
 

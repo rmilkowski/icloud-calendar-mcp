@@ -6,9 +6,17 @@ Reminders is an optional, nonrecurring extension implemented in source and **dis
 
 After a separately authorized build/installation of the new settled app, explicit `--enable-reminders` on `serve` opts in. The same flag on `service render` persists an actual boolean `enable_reminders:true` in the protected service configuration and adds it to the gateway launch arguments. Old configurations without the key remain valid and disabled; false preserves the old launch arguments. Rendering never installs/restarts a service or requests OS access. Follow the existing reviewed service maintenance procedure before changing an installed configuration.
 
-Use the existing MCP connection and private tunnel; no second plugin, Apple password or separate Apple login is needed. After explicitly enabling the extension, refresh ChatGPT/Codex tool definitions to see 39 tools rather than the default 22. Tool discovery does not grant OS access or validate a write.
+Use two separate ChatGPT plugins: the existing Calendar tunnel exposes only its 22 Calendar tools, and a second distinct private tunnel exposes only the 17 Reminders tools. Both adapters connect to the same gateway and native helper. No Apple password or separate Apple login is needed. Refresh each plugin's tool definitions after setup. Tool discovery does not grant OS access or validate a write.
 
-The following are **future, attended setup examples after an explicitly authorized settled build**, not actions performed for this source work. Preserve the existing state, authority port and owner configuration:
+First explicitly initialize the independent local Reminders credential. This preserves the existing Calendar credential and history; serving never creates a missing credential:
+
+```sh
+./scripts/calendar-mcp init --state-dir "/absolute/private/state" --enable-reminders
+```
+
+The existing `gateway.token` authorizes only Calendar `/mcp` and `/status`. Independent `reminders.token` authorizes only `/reminders/mcp` and `/reminders/status`; neither key is pasted into ChatGPT. The protected Unix endpoint and fixed adapter resource enforce the same separation as HTTP routes. Calendar stdio defaults to `--resource calendar`; Reminders must explicitly use `--resource reminders`.
+
+The initialization and following commands are **future, attended setup examples after an explicitly authorized settled build**, not actions performed for this source work. Preserve the existing state, authority port and owner configuration:
 
 ```sh
 ./scripts/calendar-mcp serve \
@@ -22,13 +30,57 @@ For the optional login service, render with the same existing private tunnel/con
 ```sh
 ./scripts/calendar-mcp service render \
   --helper "/absolute/settled/Calendar MCP Helper.app/Contents/MacOS/CalendarHelper" \
+  --python "/absolute/configured/python" \
   --state-dir "/absolute/private/state" --port 8765 \
   --tunnel-client "/absolute/verified/tunnel-client" \
   --tunnel-id YOUR_EXISTING_PRIVATE_TUNNEL_ID \
   --tunnel-env "/absolute/private/tunnel.env" \
   --profile-dir "/absolute/private/tunnel-profiles" \
-  --alias EXISTING_ALIAS --profile EXISTING_PROFILE --enable-reminders
+  --alias EXISTING_ALIAS --profile EXISTING_PROFILE --enable-reminders \
+  --reminders-tunnel-id YOUR_DISTINCT_REMINDERS_TUNNEL_ID \
+  --reminders-tunnel-env "/absolute/private/tunnel.env" \
+  --reminders-profile-dir "/absolute/private/reminders-tunnel-profiles" \
+  --reminders-alias reminders --reminders-profile reminders
 ```
+
+The five `--reminders-*` options are all-or-none and require `--enable-reminders`. They persist an exact `reminders_tunnel` object with `tunnel_id`, `tunnel_env`, `profile_dir`, `alias` and `profile`. Use a distinct tunnel ID, alias and canonical profile directory; a profile name or protected runtime environment file may be reused. Only the existing two gateway/monitor LaunchAgents are rendered. The monitor tracks `reminders_tunnel` separately, with its own restart attempts, backoff, startup grace and incidents; reconfiguration preserves historical budgets. The new Reminders runtime must have an official managed JSON profile (`<profile>.yaml`) in an owned mode-`0700` directory, with an owned mode-`0600`, single-link regular file. Before recovery the monitor verifies exactly one `main` stdio command whose text exactly matches the service-generated canonical quoting for the configured Reminders adapter. Equivalent manual formatting is refused. Manual YAML dialects, alternate HTTP targets, extra channels and command changes fail closed. This checks configured ownership; it is not an OS sandbox against the same user editing both profile and service state. Existing Calendar profile handling remains compatible; its deferred protected-profile relocation is separate.
+
+The official tunnel service supports one configured MCP target per tunnel ID. After separately arranging a second private tunnel and reviewing its official managed runtime/profile, its fixed target is:
+
+```sh
+/absolute/configured/python -m calendar_mcp stdio \
+  --state-dir "/absolute/private/state" --port 8765 --resource reminders
+```
+
+For service management, the executable, arguments and canonical command quoting must match the rendered service configuration exactly (`--python` selects that interpreter); an equivalent wrapper command is not adopted automatically. The official managed runtime/profile must be prepared and reviewed before the service can own it; an absent profile is not proof of safe ownership. Follow the existing tunnel connection and stopped-runtime service cutover procedure using the distinct Reminders ID/alias/directory and this exact command. Keep the existing Calendar target unchanged. Add the distinct Reminders tunnel as a separate custom MCP plugin in ChatGPT, using the [same private-tunnel connection procedure](setup.md#7-add-the-private-tunnel-in-chatgpt). This source change does not create a tunnel, runtime credential, workspace connection or ChatGPT plugin.
+
+For a future attended setup, run from this repository with the foreground gateway already using the same state/port and explicit Reminders opt-in. The distinct remote tunnel and runtime credential must already have been arranged through the official workspace setup. Prepare its owned runtime with the exact interpreter/arguments from the render command above:
+
+```sh
+reminders_python="/absolute/configured/python"
+reminders_tunnel_client="/absolute/verified/tunnel-client"
+reminders_mcp_command=$("$reminders_python" -c 'import pathlib,shlex,sys; print(shlex.join([str(pathlib.Path(sys.executable).resolve()),"-m","calendar_mcp","stdio","--state-dir","/absolute/private/state","--port","8765","--resource","reminders"]))')
+mkdir -m 700 "/absolute/private/reminders-tunnel-profiles"
+(
+  set +x
+  set -e
+  unset CONTROL_PLANE_API_KEY
+  set -a
+  . "/absolute/private/tunnel.env"
+  set +a
+  : "${CONTROL_PLANE_API_KEY:?runtime credential missing}"
+  "$reminders_tunnel_client" runtimes connect \
+    --alias reminders --profile reminders \
+    --profile-dir "/absolute/private/reminders-tunnel-profiles" \
+    --runtime-api-key env:CONTROL_PLANE_API_KEY \
+    --tunnel-id YOUR_DISTINCT_REMINDERS_TUNNEL_ID \
+    --mcp-command "$reminders_mcp_command"
+)
+"$reminders_tunnel_client" runtimes status reminders --json
+"$reminders_tunnel_client" runtimes stop reminders
+```
+
+Source only the trusted protected literal environment file with tracing disabled. Verify the prepared runtime's exact ownership and health before stopping it; preserve its profile for service ownership checks. The parent directory must already be private and owned. Apply the existing stopped-runtime cutover to the Calendar runtime and gateway as well. A failed/uncertain stop requires inspection, not installation over the live owner.
 
 Use the normal reviewed `service install` procedure; do not run a foreground and service owner together. A later explicit OS authorization request for that final app uses:
 
@@ -39,11 +91,11 @@ Use the normal reviewed `service install` procedure; do not run a foreground and
 
 Enabling the extension is a local configuration choice. It does not replace OS permission or the normal exact-preview host write-consent policy.
 
-Disabled means no Reminders capability/authorization probes, state creation, data access or tools. Explicit opt-in against an older helper can fail as unsupported configuration; there is no automatic fallback, relaunch or hidden enabling. Exact native `reminders_capabilities` adds seventeen tools, giving 39 with a fully capable 22-tool Calendar broker. An enabled gateway exposes supported tools even when the separate Reminders grant is missing, so journal status/history/assessment remain available after permission revocation. Provider operations return `reminders_access_required`; enabling and serving never request access.
+Disabled means no Reminders capability/authorization probes, state creation, data access or tools. Explicit opt-in against an older helper can fail as unsupported configuration; there is no automatic fallback, relaunch or hidden enabling. Exact native `reminders_capabilities` exposes seventeen tools only on the Reminders resource; the Calendar resource remains Calendar-only. An enabled gateway exposes supported tools even when the separate Reminders grant is missing, so journal status/history/assessment remain available after permission revocation. Provider operations return `reminders_access_required`; enabling and serving never request access.
 
 Only a future, explicitly requested attended local `--authorize-reminders` action may request the final app's Reminders permission through LaunchServices. This is separate from Calendar Full Access and from consent to any particular change. Do not rebuild the current installed app, repeat OS prompts or grant unrelated host processes permission to try this source feature. No Reminders OS prompt or live validation is authorized by this document.
 
-Gateway `status` keeps Calendar metadata under `native` and adds a separate `reminders` object only when opted in. The monitor continues to assess Calendar/native availability; denied Reminders access is not a reason to restart Calendar services. Read the separate metadata with:
+Calendar `status` remains Calendar-only. Reminders status is separately authenticated and available only when opted in. The monitor continues to assess Calendar/native availability; denied Reminders access is not a reason to restart Calendar services. Read the separate metadata with:
 
 ```sh
 ./scripts/calendar-mcp reminders status --state-dir /absolute/private/state --port 8765
@@ -112,18 +164,19 @@ Read-only local history/preparation is available without reading SQLite or keys:
 
 Pass the same configured state/port to every command. There is no standalone commit-from-file command or Terminal write-consent flow; the MCP tools remain the normal write surface.
 
-Backups/maintenance must preserve the **entire** Reminders subdirectory, including encrypted details/keys, nonces, proof/unknown evidence, audit, quotas and assessment receipts. Never restore an older state over newer authoritative history. The existing Calendar `--rotate-keys` flag is Calendar-only unless an explicit reminder equivalent is documented; do not claim it rotates Reminders keys. Gateway credential-binding changes are adopted by both enabled stores on restart without erasing history. Repair forward after committed migrations.
+Backups/maintenance must preserve the **entire** Reminders subdirectory, including encrypted details/keys, nonces, proof/unknown evidence, audit, quotas and assessment receipts. Never restore an older state over newer authoritative history. The existing Calendar `--rotate-keys` flag is Calendar-only unless an explicit reminder equivalent is documented; do not claim it rotates Reminders keys. Each resource credential binding rotates only its own native signing generation on restart without erasing history. Rotating `gateway.token` does not rotate the Reminders binding; rotating `reminders.token` does not rotate the Calendar binding. Repair forward after committed migrations.
 
 ## Validation limits
 
-Final validation used the same new raw helper, SHA-256 `527686458f3b94c31b8de1680972fcdd5ac429b5f1705c112436e9775a449a1a`:
+Final split-plugin validation used the same newly built raw helper, SHA-256 `126fddc3920424a00d0f7541e3feb1dd57357613fdccd04fdf79af3e5cc06fa5`:
 
-- Strict native suite: 374 tests, zero failures and zero skips, execution 27.532 seconds after a 13.178-second build.
-- Full Python suite: 166 tests in 9.470 seconds; 163 passed and the three existing explicitly opt-in packaged LaunchServices tests were skipped. No Reminders feature test was skipped.
-- Focused Python checks: sixteen passed, including actual raw-helper create/date/absolute-alert, modify with identical supplied alarms, complete/reopen, one-source inverse, deletion-copy recovery, history/status and replay, plus full 39-tool protected Unix HTTP/stdio discovery and separate no-grant behavior.
+- Strict native suite: 374 tests, zero failures and zero skips; execution 26.376 seconds after a 13.233-second build.
+- Full Python suite: 192 tests in 10.351 seconds; 189 passed and the three existing explicitly opt-in packaged LaunchServices tests were skipped. No feature test was skipped.
+- Actual raw-helper tests exercised separate Calendar-only 22 and Reminders-only 17 catalogs, protected HTTP/stdio resource isolation, independent credential bindings, helper lifecycle, source/assessment replay and no-grant behavior. Existing reminder create/date/absolute-alert, modify, complete/reopen, one-source inverse, deletion-copy and history/status paths also executed.
+- Service tests covered exact canonical command quoting, protected managed-profile ownership, independent restart budgets and preservation of existing monitor history. Official CLI help/local-only synthetic profile generation and narrowly sanitized read-only managed-profile schema inspection grounded the integration; no runtime was connected or controlled during that inspection.
 
 XCTest-only exports created fresh private synthetic unknown states, closed every state owner and then opened the actual helper in synthetic mode. DEL/BMP/non-BMP sources passed full original-preview → unknown → host-visible assessment → journal commit and identical receipt replay. The original encrypted payload, single execution and quota charge remained preserved; exactly one assessment receipt was recorded, with no provider operation. The production helper has no fault/seed control. Pure native tests cover callback deadline/late-completion safety and exact public metadata witnesses, including external-action alarm refusal and preservation of supported local richer alarms.
 
-A temporary bundle was assembled and signature/metadata checked, including both Calendar/Reminders usage descriptions and the license. That app was never launched; the installed helper, signature, grant and service runtime were not rebuilt/replaced or changed. The public EventKit adapter compiled, but no real EventKit fetch/mutation, account data, OS authorization prompt or live provider validation occurred.
+The installed helper, signature, grants, credentials and service runtime were not rebuilt/replaced or changed. No ChatGPT plugin, private tunnel or remote credential was created; no tunnel was connected. The public EventKit adapter compiled, but no real EventKit fetch/mutation, account data, OS authorization prompt or live provider validation occurred.
 
 These results establish source/synthetic behavior only. A future separately authorized settled build/installation, explicit activation, separate Reminders grant, intended host refresh and scoped live checks remain required. Provider date/component preservation, completion precision, alarm delivery, hidden/private metadata, recovery behavior and host confirmation rendering remain unverified.

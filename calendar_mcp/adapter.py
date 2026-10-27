@@ -8,14 +8,17 @@ import sys
 
 from .protocol import VERSIONS, error, loads
 from .json_values import validate_json
-from .security import read_token
+from .security import read_token, resource_name
 from .local_ipc import LocalHTTPConnection
 from .server import MAX_BODY, MAX_RESPONSE
 
 
 class GatewayClient:
-    def __init__(self, state, port=8765):
-        self.token = read_token(state)
+    def __init__(self, state, port=8765, *, resource="calendar"):
+        self.resource = resource_name(resource)
+        self.token = read_token(state, self.resource)
+        self.mcp_path = "/mcp" if self.resource == "calendar" else "/reminders/mcp"
+        self.status_path = "/status" if self.resource == "calendar" else "/reminders/status"
         if type(port) is not int or not 1 <= port <= 65535:
             raise ValueError("Invalid local port")
         self.port = port
@@ -25,7 +28,7 @@ class GatewayClient:
         # Peer authentication precedes all HTTP bytes, including Authorization.
         connection = LocalHTTPConnection(self.state, self.port, timeout=50)
         try:
-            connection.request("POST", "/mcp", body=wire,
+            connection.request("POST", self.mcp_path, body=wire,
                                headers={"Authorization": "Bearer " + self.token,
                                         "Content-Type": "application/json",
                                         "Accept": "application/json, text/event-stream",
@@ -47,7 +50,7 @@ class GatewayClient:
     def status(self, timeout=50):
         connection = LocalHTTPConnection(self.state, self.port, timeout=timeout)
         try:
-            connection.request("GET", "/status", headers={"Authorization": "Bearer " + self.token,
+            connection.request("GET", self.status_path, headers={"Authorization": "Bearer " + self.token,
                                                           "Accept": "application/json"})
             response = connection.getresponse()
             body = response.read(MAX_RESPONSE + 1)
@@ -62,6 +65,9 @@ def run_stdio(client, source=None, sink=None):
     source = source or sys.stdin.buffer
     sink = sink or sys.stdout.buffer
     version = VERSIONS[-1]
+    status_tool = "get_reminder_change_status" if getattr(client, "resource", "calendar") == "reminders" else "get_change_status"
+    transport_failure = "Gateway transport failed; no retry. If a write was submitted, query " + status_tool + " by nonce after reconnecting"
+    response_failure = "Invalid gateway response; no retry. If a write was submitted, query " + status_tool + " by nonce after reconnecting"
     while True:
         wire = source.readline(MAX_BODY + 1)
         if not wire:
@@ -91,15 +97,15 @@ def run_stdio(client, source=None, sink=None):
             submitted = True
             result = client.send(wire, version)
         except (ValueError, UnicodeError, RecursionError, TypeError, AttributeError):
-            result = (error(identifier, -32603, "Invalid gateway response; no retry. If a write was submitted, query get_change_status by nonce after reconnecting")
+            result = (error(identifier, -32603, response_failure)
                       if submitted else error(identifier, -32700, "Invalid request"))
         except (OSError, http.client.HTTPException):
-            result = error(identifier, -32603, "Gateway transport failed; no retry. If a write was submitted, query get_change_status by nonce after reconnecting")
+            result = error(identifier, -32603, transport_failure)
         if result is not None:
             try:
                 validate_json(result, max_depth=32)
                 response = json.dumps(result, ensure_ascii=True, allow_nan=False).encode() + b"\n"
             except (ValueError, UnicodeError, RecursionError, TypeError, OverflowError):
-                response = json.dumps(error(identifier, -32603, "Invalid gateway response; no retry. If a write was submitted, query get_change_status by nonce after reconnecting")).encode() + b"\n"
+                response = json.dumps(error(identifier, -32603, response_failure)).encode() + b"\n"
             sink.write(response)
             sink.flush()

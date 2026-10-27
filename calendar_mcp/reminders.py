@@ -59,7 +59,7 @@ def read_tool(client, name, arguments):
 
 
 def dispatch(args):
-    client = GatewayClient(args.state_dir, args.port)
+    client = GatewayClient(args.state_dir, args.port, resource="reminders")
     if args.reminders_command == "status":
         reply = client.status()
         if not isinstance(reply, dict) or reply.get("gateway") != "reachable":

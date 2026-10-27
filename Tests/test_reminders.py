@@ -135,12 +135,15 @@ class ReminderActivationTests(unittest.TestCase):
             helper.write_text("#!" + sys.executable + "\nimport json,sys\nfor line in sys.stdin:\n r=json.loads(line); print(json.dumps({'result':{'argv':sys.argv[1:],'op':r['op']}}),flush=True)\n")
             helper.chmod(0o700)
             for enabled in (False, True):
-                broker = NativeBroker(helper, directory, "synthetic", enable_reminders=enabled)
+                broker = NativeBroker(helper, directory, "synthetic", enable_reminders=enabled, reminders_credential_binding="b" * 64 if enabled else None)
                 try:
                     reply = broker.call("list_calendars", {})
                     self.assertIs(broker.reminders_enabled, enabled)
                     self.assertEqual(reply["argv"].count("--enable-reminders"), int(enabled))
                     self.assertNotIn("--authorize-reminders", reply["argv"])
+                    self.assertEqual(reply["argv"].count("--reminders-credential-binding"), int(enabled))
+                    if enabled:
+                        self.assertEqual(reply["argv"][reply["argv"].index("--reminders-credential-binding") + 1], "b" * 64)
                     self.assertEqual(reply["op"], "list_calendars")
                 finally:
                     broker.close()
@@ -202,11 +205,11 @@ class ReminderDateTests(unittest.TestCase):
 class ReminderContractTests(unittest.TestCase):
     def test_enabled_catalog_is_independent_and_missing_grant_keeps_history(self):
         broker = ReminderBroker()
-        protocol = Protocol(broker)
+        protocol = Protocol(broker, resource="reminders")
         calendar = Protocol(AssessmentBroker()).tools
-        self.assertEqual(len(protocol.tools), 39)
-        self.assertEqual(protocol.tools[:22], calendar)
-        self.assertEqual(protocol.tools[22:], REMINDER_TOOLS)
+        self.assertEqual(len(protocol.tools), 17)
+        self.assertEqual(protocol.tools, REMINDER_TOOLS)
+        self.assertEqual(Protocol(broker).tools, calendar)
         for item in REMINDER_TOOLS:
             hints = item["annotations"]
             self.assertFalse(hints["openWorldHint"])
@@ -221,10 +224,11 @@ class ReminderContractTests(unittest.TestCase):
         for invalid in (None, {**REMINDERS_CAPABILITIES, "version": True}, {**REMINDERS_CAPABILITIES, "extra": True}):
             broker = ReminderBroker(); broker.reminders_capabilities = lambda: invalid
             broker.call = lambda *_: self.fail("Unavailable Reminders must not dispatch")
+            with self.assertRaises(NativeError):
+                Protocol(broker, resource="reminders")
             fallback = Protocol(broker)
             self.assertEqual(fallback.tools, calendar)
-            result = fallback.handle(request("list_reminder_changes", {}))["result"]
-            self.assertTrue(result["isError"])
+            self.assertIn("error", fallback.handle(request("list_reminder_changes", {})))
 
     def test_strict_preflight_query_fields_and_absolute_alerts(self):
         valid = [("preflight_reminder_change", {"action": "create", "scope": "this", "list_id": "list", "fields": {"title": "Fixture"}}),
@@ -249,7 +253,7 @@ class ReminderContractTests(unittest.TestCase):
                 validate_reminder_arguments(name, arguments)
 
     def test_full_signed_actions_inverse_and_cross_domain_routes(self):
-        broker = ReminderBroker(); protocol = Protocol(broker)
+        broker = ReminderBroker(); protocol = Protocol(broker, resource="reminders")
         for action in ("create", "modify", "complete", "reopen", "delete"):
             preview = reminder_preview(action)
             name = "commit_reminder_" + action
@@ -299,21 +303,23 @@ class ReminderContractTests(unittest.TestCase):
 
 
 class ReminderTransportTests(unittest.TestCase):
-    def test_full_39_tool_unix_http_stdio_and_separate_status(self):
+    def test_scoped_17_tool_unix_http_stdio_and_separate_status(self):
         with tempfile.TemporaryDirectory(prefix="reminders synthetic transport ") as directory:
-            state = initialize(Path(directory) / "state")
+            state = initialize(Path(directory) / "state"); initialize(state, "reminders")
             broker = ReminderBroker()
-            server = GatewayServer(0, read_token(state), Protocol(broker), state_directory=state)
+            server = GatewayServer(0, read_token(state), Protocol(broker), state_directory=state,
+                                   reminders_token=read_token(state, "reminders"), reminders_protocol=Protocol(broker, resource="reminders"))
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
             thread.start()
             try:
-                client = GatewayClient(state, server.server_port)
+                client = GatewayClient(state, server.server_port, resource="reminders")
                 status = client.status()
-                self.assertEqual(status["native"]["authorization_status"], "full_access")
+                self.assertNotIn("native", status)
+                self.assertEqual(GatewayClient(state, server.server_port).status()["native"]["authorization_status"], "full_access")
                 self.assertEqual(status["reminders"]["authorization_status"], "denied")
                 discovery = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
                 result = client.send(json.dumps(discovery).encode())
-                self.assertEqual(len(result["result"]["tools"]), 39)
+                self.assertEqual(len(result["result"]["tools"]), 17)
                 self.assertLess(len(json.dumps(result).encode()), MAX_RESPONSE)
                 self.assertEqual(loads(json.dumps(result), max_depth=32), result)
                 for call in (discovery, request("commit_reminder_modify", {"preview": reminder_preview()}),
@@ -327,7 +333,9 @@ class ReminderTransportTests(unittest.TestCase):
                 class EchoBroker(ReminderBroker):
                     def call(self, name, arguments):
                         return {"preview": arguments["preview"]}
-                server.protocol = Protocol(EchoBroker())
+                echo = EchoBroker()
+                server.protocol = Protocol(echo)
+                server.reminders_protocol = Protocol(echo, resource="reminders")
                 for text in ("中" * 30000, "🗓" * 16000):
                     ordinary = reminder_preview()
                     ordinary["envelope"]["before"]["fields"]["notes"] = text
@@ -350,8 +358,9 @@ class ReminderTransportTests(unittest.TestCase):
         calls = []
 
         class Client:
-            def __init__(self, state, port):
-                pass
+            def __init__(self, state, port, *, resource="calendar"):
+                if resource != "reminders":
+                    raise AssertionError("Reminder CLI must use its own resource credential")
 
             def send(self, wire):
                 calls.append(loads(wire))
@@ -367,7 +376,7 @@ class ReminderTransportTests(unittest.TestCase):
         self.assertEqual([call["params"]["name"] for call in calls], ["list_reminder_changes", "get_stored_reminder_change",
             "get_reminder_change_status", "list_unresolved_reminder_changes", "preflight_reminder_rollback"])
         with self.assertRaises(ValueError):
-            reminders.read_tool(Client(None, None), "commit_reminder_delete", {"preview": reminder_preview("delete")})
+            reminders.read_tool(Client(None, None, resource="reminders"), "commit_reminder_delete", {"preview": reminder_preview("delete")})
 
 
 REMINDERS_HELPER = Path(os.environ.get("CALENDAR_MCP_TEST_HELPER", "/nonexistent-reminders-test-helper"))
@@ -381,12 +390,13 @@ class NativeReminderIntegrationTests(unittest.TestCase):
         self.assertEqual(len(bundles), 1, "The raw-helper integration requires its matching built XCTest fixture bundle")
         for kind, expected in (("del", "\x7f" * 30000), ("bmp", "中" * 30000), ("nonbmp", "🗓" * 14000)):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="reminders-synthetic-export-") as directory:
-                state = initialize(Path(directory) / "gateway")
+                state = initialize(Path(directory) / "gateway"); initialize(state, "reminders")
                 token = read_token(state)
+                reminder_token = read_token(state, "reminders")
                 native = state / "native-synthetic"
                 env = os.environ.copy()
                 env.update(CALENDAR_MCP_REMINDER_EXPORT_ROOT=str(native),
-                           CALENDAR_MCP_REMINDER_EXPORT_BINDING=hashlib.sha256(token.encode()).hexdigest(),
+                           CALENDAR_MCP_REMINDER_EXPORT_BINDING=hashlib.sha256(reminder_token.encode()).hexdigest(),
                            CALENDAR_MCP_REMINDER_EXPORT_TEXT=kind)
                 log = Path(directory) / "fixture-export.log"
                 descriptor = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -404,11 +414,13 @@ class NativeReminderIntegrationTests(unittest.TestCase):
                     self.assertEqual(connection.execute("SELECT COUNT(*) FROM executions").fetchone()[0], 1)
                     self.assertEqual(connection.execute("SELECT COUNT(*) FROM quota").fetchone()[0], 1)
                 broker = NativeBroker(REMINDERS_HELPER, native, "synthetic", enable_reminders=True,
-                    credential_binding=hashlib.sha256(token.encode()).hexdigest())
-                server = GatewayServer(0, token, Protocol(broker), state_directory=state)
+                    credential_binding=hashlib.sha256(token.encode()).hexdigest(),
+                    reminders_credential_binding=hashlib.sha256(reminder_token.encode()).hexdigest())
+                server = GatewayServer(0, token, Protocol(broker), state_directory=state,
+                    reminders_token=reminder_token, reminders_protocol=Protocol(broker, resource="reminders"))
                 thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True); thread.start()
                 try:
-                    client = GatewayClient(state, server.server_port)
+                    client = GatewayClient(state, server.server_port, resource="reminders")
 
                     def call(name, arguments):
                         wire = json.dumps(request(name, arguments), ensure_ascii=True).encode()
@@ -447,23 +459,26 @@ class NativeReminderIntegrationTests(unittest.TestCase):
 
     def test_native_all_actions_history_inverse_copy_and_full_transport(self):
         with tempfile.TemporaryDirectory(prefix="reminders synthetic native ") as directory:
-            state = initialize(Path(directory) / "gateway")
+            state = initialize(Path(directory) / "gateway"); initialize(state, "reminders")
             token = read_token(state)
+            reminder_token = read_token(state, "reminders")
             native = state / "native-synthetic"; native.mkdir(mode=0o700)
             broker = NativeBroker(REMINDERS_HELPER, native, "synthetic", enable_reminders=True,
-                                  credential_binding=hashlib.sha256(token.encode()).hexdigest())
+                                  credential_binding=hashlib.sha256(token.encode()).hexdigest(),
+                    reminders_credential_binding=hashlib.sha256(reminder_token.encode()).hexdigest())
             self.addCleanup(broker.close)
             self.assertIsNotNone(broker.reminders_capabilities(), "The configured final helper must implement Reminders")
-            server = GatewayServer(0, token, Protocol(broker), state_directory=state)
+            server = GatewayServer(0, token, Protocol(broker), state_directory=state,
+                    reminders_token=reminder_token, reminders_protocol=Protocol(broker, resource="reminders"))
             thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True); thread.start()
             try:
-                client = GatewayClient(state, server.server_port)
+                client = GatewayClient(state, server.server_port, resource="reminders")
                 self.assertEqual(client.status()["reminders"]["authorization_status"], "not_applicable")
                 listed = client.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode())
-                self.assertEqual(len(listed["result"]["tools"]), 39)
+                self.assertEqual(len(listed["result"]["tools"]), 17)
                 discovery = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).encode()
                 sink = io.BytesIO(); self.assertEqual(run_stdio(client, io.BytesIO(discovery + b"\n"), sink), 0)
-                self.assertEqual(len(loads(sink.getvalue(), max_depth=32)["result"]["tools"]), 39)
+                self.assertEqual(len(loads(sink.getvalue(), max_depth=32)["result"]["tools"]), 17)
 
                 def call(name, arguments=None):
                     wire = json.dumps(request(name, arguments or {})).encode()

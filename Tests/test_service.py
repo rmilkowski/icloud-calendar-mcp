@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import plistlib
 import stat
+import shlex
 import sys
 import tempfile
 import threading
@@ -26,6 +27,7 @@ class FakeSystem:
     def __init__(self, gateway="healthy", tunnel="healthy"):
         self.gateway_health = gateway
         self.tunnel_health = tunnel
+        self.reminders_tunnel_health = "healthy"
         self.restarts = []
         self.events = []
         self.commands = []
@@ -40,8 +42,8 @@ class FakeSystem:
     def gateway(self):
         return self.gateway_health
 
-    def tunnel(self):
-        return self.tunnel_health
+    def tunnel(self, component="tunnel"):
+        return self.reminders_tunnel_health if component == "reminders_tunnel" else self.tunnel_health
 
     def recover(self, component):
         self.restarts.append(component)
@@ -88,9 +90,16 @@ class ServiceTests(unittest.TestCase):
             "helper": str(helper), "state": str(self.state), "port": 18765, "backend": "eventkit",
             "tunnel_client": "/usr/bin/true", "tunnel_id": "synthetic-id", "tunnel_env": str(self.env),
             "profile_dir": str(profiles), "alias": "fixture", "profile": "fixture", "notify": True}
+        self.write_profile(self.config, "tunnel")
         service._json_write(self.directory / "config.json", self.config)
         for label, value in service.plists(self.config).items():
             service._write(self.directory / (label + ".plist"), plistlib.dumps(value))
+
+    def write_profile(self, config, component):
+        service._json_write(Path(config["profile_dir"]) / (config["profile"] + ".yaml"), {
+            "config_version": 1, "control_plane": {"tunnel_id": config["tunnel_id"],
+                "api_key": "env:CONTROL_PLANE_API_KEY"}, "mcp": {"commands": [{
+                    "channel": "main", "command": shlex.join(service.adapter_command(config, component))}]}})
 
     def tearDown(self):
         self.temp.cleanup()
@@ -164,6 +173,183 @@ class ServiceTests(unittest.TestCase):
 
         with patch("calendar_mcp.service.GatewayClient", Client):
             self.assertEqual(service.System(self.config).gateway(), "healthy")
+
+    def enable_reminders_tunnel(self):
+        profiles = self.root / "reminder profiles"
+        profiles.mkdir(mode=0o700, exist_ok=True)
+        self.config.update(enable_reminders=True, reminders_tunnel={
+            "tunnel_id": "synthetic-reminders-id", "tunnel_env": str(self.env),
+            "profile_dir": str(profiles), "alias": "reminders-fixture", "profile": "fixture"})
+        self.write_profile(service.tunnel_config(self.config, "reminders_tunnel"), "reminders_tunnel")
+        service._json_write(self.directory / "config.json", self.config)
+        for label, value in service.plists(self.config).items():
+            service._write(self.directory / (label + ".plist"), plistlib.dumps(value))
+
+    def test_render_optional_reminders_runtime_requires_complete_reviewed_options(self):
+        profiles = self.root / "reminders-profile"
+        profiles.mkdir(mode=0o700)
+        args = ["service", "render", "--state-dir", str(self.state), "--helper", self.config["helper"],
+            "--tunnel-client", "/usr/bin/true", "--tunnel-id", self.config["tunnel_id"],
+            "--tunnel-env", str(self.env), "--profile-dir", self.config["profile_dir"]]
+        reminder_args = ["--reminders-tunnel-id", "reminder-id", "--reminders-tunnel-env", str(self.env),
+            "--reminders-profile-dir", str(profiles), "--reminders-alias", "reminders", "--reminders-profile", "fixture"]
+        with patch.object(service, "run", side_effect=AssertionError("No child allowed")), redirect_stdout(io.StringIO()):
+            self.assertEqual(main(args + reminder_args), 1)
+            self.assertEqual(main(args + ["--enable-reminders", "--reminders-alias", "reminders"]), 1)
+            self.assertEqual(main(args + ["--enable-reminders"] + reminder_args), 0)
+        configured = service.load_config(self.state)
+        self.assertEqual(configured["reminders_tunnel"]["alias"], "reminders")
+        self.assertEqual(configured["reminders_tunnel"]["tunnel_env"], str(self.env))
+        self.assertEqual(set(service.plists(configured)), {service.GATEWAY, service.MONITOR})
+
+    def test_reminders_tunnel_config_is_exact_and_distinct(self):
+        self.enable_reminders_tunnel()
+        self.assertEqual(service.load_config(self.state), self.config)
+        original = self.config["reminders_tunnel"]
+        invalids = [None, [], {**original, "extra": True},
+                    {key: value for key, value in original.items() if key != "alias"}]
+        invalids += [{**original, key: self.config[key]} for key in ("alias", "tunnel_id", "profile_dir")]
+        invalids += [{**original, key: False} for key in original]
+        for invalid in invalids:
+            with self.subTest(invalid=invalid):
+                service._json_write(self.directory / "config.json", {**self.config, "reminders_tunnel": invalid})
+                with self.assertRaises(ValueError):
+                    service.load_config(self.state)
+        service._json_write(self.directory / "config.json", {**self.config, "enable_reminders": False})
+        with self.assertRaises(ValueError):
+            service.load_config(self.state)
+        alias = self.root / "profile-alias"
+        alias.symlink_to(self.config["profile_dir"], target_is_directory=True)
+        service._json_write(self.directory / "config.json", {**self.config,
+            "reminders_tunnel": {**original, "profile_dir": str(alias)}})
+        with self.assertRaises(ValueError):
+            service.load_config(self.state)
+
+    def test_reminders_runtime_command_is_fixed_scoped_without_second_gateway(self):
+        self.enable_reminders_tunnel()
+        calls = []
+        def runner(command, **kwargs):
+            calls.append((command, kwargs))
+            if command[2] == "status":
+                target = self.config["reminders_tunnel"]
+                return 0, json.dumps({"alias": target["alias"], "tunnel_id": target["tunnel_id"],
+                    "profile_name": target["profile"], "profile_dir": target["profile_dir"],
+                    "process_running": False, "healthy": False, "ready": False, "runtime_state": "stopped"}).encode()
+            return 0, b""
+        self.assertTrue(service.System(self.config, runner).recover("reminders_tunnel"))
+        command = calls[-1][0]
+        self.assertEqual(command[command.index("--tunnel-id") + 1], "synthetic-reminders-id")
+        import shlex
+        adapter = shlex.split(command[command.index("--mcp-command") + 1])
+        self.assertEqual(adapter[-2:], ["--resource", "reminders"])
+        self.assertEqual(adapter.count("stdio"), 1)
+        self.assertNotIn("serve", adapter)
+        self.assertEqual(set(service.plists(self.config)), {service.GATEWAY, service.MONITOR})
+        self.assertTrue(all("synthetic-runtime-secret" not in " ".join(c) for c, _ in calls))
+        with self.assertRaises(ValueError):
+            service.System(self.config, runner).recover("caller-resource")
+
+    def test_reminders_profile_target_fails_closed_for_other_resources_or_unsafe_shape(self):
+        self.enable_reminders_tunnel()
+        config = service.tunnel_config(self.config, "reminders_tunnel")
+        path = Path(config["profile_dir"]) / (config["profile"] + ".yaml")
+        original = json.loads(service._read(path))
+        self.assertTrue(service.fixed_profile_target(config, "reminders_tunnel"))
+        changes = [
+            {"commands": [{"channel": "main", "command": shlex.join(service.adapter_command(config, "tunnel"))}]},
+            {"commands": original["mcp"]["commands"] * 2},
+            {"commands": [{**original["mcp"]["commands"][0], "channel": "other"}]},
+            {"commands": original["mcp"]["commands"], "servers": []},
+            {"server_url": "http://127.0.0.1:1"}]
+        for changed in changes:
+            service._json_write(path, {**original, "mcp": changed})
+            self.assertFalse(service.fixed_profile_target(config, "reminders_tunnel"))
+        for raw in (b'{"config_version":1,"config_version":1}', b'{"x":NaN}',
+                    b'mcp:\n  commands: []\n'):
+            service._write(path, raw)
+            with self.assertRaises(ValueError):
+                service.fixed_profile_target(config, "reminders_tunnel")
+        service._json_write(path, original)
+        path.chmod(0o644)
+        with self.assertRaises(ValueError):
+            service.fixed_profile_target(config, "reminders_tunnel")
+        path.chmod(0o600)
+        Path(config["profile_dir"]).chmod(0o755)
+        with self.assertRaises(ValueError):
+            service.fixed_profile_target(config, "reminders_tunnel")
+        Path(config["profile_dir"]).chmod(0o700)
+
+    def test_reminders_profile_requires_exact_canonical_shell_quoting(self):
+        self.enable_reminders_tunnel()
+        config = service.tunnel_config(self.config, "reminders_tunnel")
+        config["state"] = str(self.root / "private$(id)`id`")
+        self.write_profile(config, "reminders_tunnel")
+        path = Path(config["profile_dir"]) / (config["profile"] + ".yaml")
+        profile = json.loads(service._read(path))
+        canonical = profile["mcp"]["commands"][0]["command"]
+        self.assertTrue(service.fixed_profile_target(config, "reminders_tunnel"))
+        for altered in (canonical.replace(shlex.quote(config["state"]), config["state"]),
+                        canonical.replace(shlex.quote(config["state"]), '"' + config["state"] + '"')):
+            # Parsing alone loses the shell quoting distinction. No command is executed.
+            self.assertEqual(shlex.split(altered), service.adapter_command(config, "reminders_tunnel"))
+            profile["mcp"]["commands"][0]["command"] = altered
+            service._json_write(path, profile)
+            self.assertFalse(service.fixed_profile_target(config, "reminders_tunnel"))
+
+    def test_reminders_unavailable_or_ambiguous_gateway_never_restarts_runtime(self):
+        self.enable_reminders_tunnel()
+        for health in ("busy", "indeterminate", "native_unavailable", "down"):
+            (self.directory / "monitor-state.json").unlink(missing_ok=True)
+            fake = FakeSystem(gateway=health)
+            fake.reminders_tunnel_health = "down"
+            self.check(fake, [1000, 1060, 1120, 1240])
+            self.assertNotIn("reminders_tunnel", fake.restarts)
+
+    def test_reminders_restart_budget_and_calendar_permission_are_independent(self):
+        self.enable_reminders_tunnel()
+        fake = FakeSystem(gateway="permission", tunnel="unhealthy")
+        fake.reminders_tunnel_health = "down"
+        fake.episode = "a" * 64
+        saved = self.check(fake, [1000, 1060, 1120, 1240, 1480, 1960])
+        self.assertEqual(fake.restarts, ["reminders_tunnel"] * 3)
+        self.assertEqual(len(saved["components"]["reminders_tunnel"]["attempts"]), 3)
+        self.assertEqual(saved["components"]["tunnel"]["attempts"], [])
+        self.assertEqual(saved["components"]["gateway"]["attempts"], [])
+        fake.episode = "b" * 64
+        saved = self.check(fake, [2100, 2160, 2220])
+        self.assertEqual(len(fake.restarts), 3)
+        self.assertTrue(saved["components"]["reminders_tunnel"]["start_pending"])
+
+    def test_install_preserves_existing_monitor_history_and_refuses_corruption(self):
+        self.enable_reminders_tunnel()
+        fake = FakeSystem(gateway="down", tunnel="down")
+        fake.reminders_tunnel_health = "down"
+        fake.registered.clear()
+        original = {"version": 1, "started": 1000, "session": "a" * 64,
+            "tunnel_start_pending": False, "tunnel_start_attempted": True,
+            "components": {"tunnel": {"failures": 7, "attempts": [2000, 2100],
+                "next": 2500, "backoff": 3, "incident": "down"}}}
+        service._json_write(self.directory / "monitor-state.json", original)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(service.install(self.state, system=fake), 0)
+        self.assertEqual(json.loads(service._read(self.directory / "monitor-state.json")), original)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(service.uninstall(self.state, system=fake), 0)
+        service._write(self.directory / "monitor-state.json", b"invalid")
+        fake.commands.clear()
+        with self.assertRaises(ValueError):
+            service.install(self.state, system=fake)
+        self.assertFalse(any(isinstance(command, list) and "bootstrap" in command for command in fake.commands))
+
+    def test_reminders_ownership_conflict_never_stops_either_tunnel(self):
+        self.enable_reminders_tunnel()
+        self.activate_fixture()
+        fake = FakeSystem()
+        fake.reminders_tunnel_health = "ownership_conflict"
+        with self.assertRaises(ValueError):
+            service.uninstall(self.state, system=fake)
+        self.assertFalse(any(isinstance(command, list) and "stop" in command for command in fake.commands))
+        self.assertNotIn(("bootout", service.GATEWAY), fake.commands)
 
     def test_literal_loader_rejects_code_extra_keys_and_insecure_file(self):
         self.assertEqual(service.runtime_environment(self.env), {"CONTROL_PLANE_API_KEY": "synthetic-runtime-secret"})

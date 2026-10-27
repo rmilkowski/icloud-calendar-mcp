@@ -22,23 +22,28 @@ The installed app's Full Access and service health have been verified for its se
 
 ## System design
 
-The diagram describes the deployed protected project-client boundary. Manual TCP compatibility has a separate residual server-identity limitation.
+The diagram includes the implemented, source-only split-plugin extension on the deployed protected project-client boundary. Manual TCP compatibility has a separate residual server-identity limitation.
 
 ```mermaid
 flowchart TB
     U[User in ChatGPT] --> C[ChatGPT native tool confirmation]
     subgraph Cloud[ChatGPT workspace]
-        C --> T[Private Secure MCP Tunnel service]
+        C --> T[Calendar private Secure MCP Tunnel]
+        C --> RT[Separate Reminders private Secure MCP Tunnel source-only]
     end
     subgraph Mac[Mac Studio]
         LD[Opt-in per-user Aqua LaunchAgents] -->|Run at GUI login| G
         LD -->|Run at login and every 60 seconds| M[Independent service monitor]
         M -.->|Bounded launchctl recovery| G
-        M -.->|Official runtime status stop connect| TC
+        M -.->|Independent durable runtime budgets| TC
+        M -.->|Optional second owned runtime| RTC
         M --> N[Private operational log and desktop notification attempt]
         TC[Official tunnel-client process] -->|Outbound authenticated connection| T
         TC <-->|Local stdio| A[Local MCP adapter]
-        A -->|Protected Unix HTTP peer UID and bearer| G[Python MCP gateway]
+        A -->|Calendar routes and gateway.token over protected Unix HTTP| G[Python MCP gateway]
+        RTC[Optional official Reminders tunnel runtime] -->|Distinct tunnel ID| RT
+        RTC <-->|Local stdio fixed resource reminders| RA[Reminders-only 17-tool adapter]
+        RA -->|Reminders routes and reminders.token over same Unix endpoint| G
         MANUAL[Explicit manual HTTP client] -->|Loopback TCP bearer with external server trust| G
         M -->|Protected Unix status| G
         G -->|Exact signed app launch| L[LaunchServices open]
@@ -546,7 +551,7 @@ Synthetic testing is the default. Do not trigger TCC prompts or mutate real cale
 
 ## Optional Reminders extension
 
-The [Reminders contract and runbook](reminders.md) describe the source-only extension. Disabled startup performs no Reminders probe, state creation, access or prompt and preserves existing Calendar tools/status. Explicit opt-in persists through foreground/service configuration and gates the exact independent native capability. Enabled tools remain visible without a Reminders grant so journal history/assessment remain accessible; provider operations fail `reminders_access_required` until separately granted. Calendar monitor health remains independent.
+The [Reminders contract and runbook](reminders.md) describe the source-only extension. Disabled startup performs no Reminders probe, state creation, access or prompt and preserves existing Calendar tools/status. Explicit opt-in persists through foreground/service configuration and gates the exact independent native capability. Calendar discovery remains Calendar-only (22 tools); Reminders discovery is fixed to its separate resource (17 tools), with no combined plugin catalog. Enabled tools remain visible without a Reminders grant so journal history/assessment remain accessible; provider operations fail `reminders_access_required` until separately granted. Calendar monitor health remains independent.
 
 Its independently typed `reminders_capabilities({})` result is exactly:
 
@@ -558,7 +563,7 @@ Private `reminders_authorization_status({})` has the same four-field shape as Ca
 
 The separate Reminders store uses domain `reminders`, storage contract 1 and its own DB/installation/signing identity, encrypted details, replay/assessment claims, audit and budgets. Calendar writer floor 7, encoding 2 and all existing authoritative history remain unchanged. Domain-separated signed ordinary/recovery and journal-assessment envelopes cannot cross resource/commit routes. Each write signs supported before/after state, mask, completion policy and fixed recovery limitations; raw inverse/copy restoration details are also host-visible. Five-day retained details, unresolved-source holds, immutable intent/nonces and bounded observation counters follow the independent reminder contract. Backups include the entire reminder subdirectory; Calendar-only key rotation is not a reminder-key rotation. No global cross-resource quota is claimed.
 
-Final source validation passed 374 strict native tests with zero failures/skips and the full 166-test Python suite (163 passed; three existing opt-in packaged lifecycle skips). Reminders actual-helper actions/recovery and closed synthetic unknown-assessment export/replay tests executed without a feature skip, alongside pure callback/witness tests. No installed app/OS access or deployment is changed. Snapshot/preview/wire limits and full 39-tool protected HTTP/stdio discovery are checked without relaxing Calendar contracts. See the runbook for exact date, absolute-alarm, one-source inverse and journal-assessment limitations; provider/host behavior remains unverified.
+Final split-plugin source validation passed 374 strict native tests with zero failures/skips (26.376 seconds after a 13.233-second build) and the full 192-test Python suite (189 passed; three existing opt-in packaged lifecycle skips; 10.351 seconds). Both used raw helper SHA-256 `126fddc3920424a00d0f7541e3feb1dd57357613fdccd04fdf79af3e5cc06fa5`. Actual-helper resource isolation, independent credential binding, lifecycle, Reminders actions/recovery and closed synthetic unknown-assessment export/replay tests executed without a feature skip, alongside pure callback/witness and service ownership/budget tests. Separate 22/17 discovery and snapshot/preview/wire limits were checked without relaxing Calendar contracts. No installed app, grant, credentials or services were changed, and no plugin/tunnel was created or connected. See the runbook for exact date, absolute-alarm, one-source inverse and journal-assessment limitations; provider/host behavior remains unverified.
 
 ## Official sources
 
@@ -592,3 +597,15 @@ There is no Calendar-backend edge in this path: inventory, preflight and commit 
 The same transaction inserts one immutable `reconciliation_claims(nonce,source_nonce,preview_digest,receipt,created)` row. The source nonce is unique; receipts contain only IDs, reconciled state/outcome, assessment/verification labels and audit sequence, with no evidence text or original event content. Insert-only triggers retain claims through detail expiry and prohibit nonce collisions with Calendar executions in both directions, including inserts by frozen floor-6 helpers. Audit or storage failure rolls back all assessment effects. No Calendar execution action/intent, quota charge, refund, payload cipher/key rewrite, original nonce reuse or recovery link is created. Original payloads, quota claims and audit history remain authoritative; retained mutable result ciphertext changes through the existing encrypted result writer. Existing retention rules may later expire resolved details; the minimal receipt remains replayable.
 
 User assessment may remove a related unknown conflict block, but cannot make the source eligible for automatic rollback. A separately authorized Calendar change still needs a fresh exact preview and normal host/native safeguards. Assessment claims and original unknown evidence remain part of authoritative retained state.
+
+
+## Separate Calendar and Reminders plugin boundary (source-only)
+
+The gateway dispatches Calendar `/mcp` and `/status` using the existing `gateway.token`, and Reminders `/reminders/mcp` and `/reminders/status` using independent `reminders.token`. Route credentials and tool allowlists both enforce resource isolation over shared TCP/Unix listeners. Fixed `stdio --resource calendar|reminders` adapters cannot select a new resource per request. Calendar is the backward-compatible default. Explicit `init --enable-reminders` initializes the new token; serving only reads it, rejects equal resource tokens and never silently initializes/rotates one. Disabled startup never reads it or probes the Reminders broker.
+
+The single native helper uses independent Calendar and Reminders credential hashes. Changing one token rotates only that store's signing generation while preserving its authoritative history; no existing state migration or provider operation is needed. The optional service `reminders_tunnel` is exactly `{tunnel_id,tunnel_env,profile_dir,alias,profile}`, requires `enable_reminders:true`, shares the official client binary and requires distinct tunnel ID, alias and canonical profile directory. Profile names and the protected runtime credential environment may be reused. Each tunnel ID has one fixed MCP target; no undocumented app-ID-aware multiplexing is assumed.
+
+The monitor retains the existing Calendar component/startup fields and adds independent Reminders episode/startup markers and durable attempts/backoff. Both runtime ownerships are checked before uninstall stops either. Install validates and preserves existing monitor state, so reconfiguration cannot replenish a restart budget. A Calendar permission denial can leave the shared channel available to the Reminders runtime, while unavailable/busy/indeterminate channels and ambiguous ownership prevent recovery. Neither permission denial is a reason to restart the gateway. This source change has not connected tunnels, created plugins or changed installed runtime profiles.
+
+
+Official v0.0.17 local-only `init` was checked in a fresh private temporary home with a synthetic tunnel ID and fixed harmless command, without runtime connection or credentials. A narrowly sanitized read-only inspection confirmed that the actual managed runtime writes JSON to `<profile>.yaml`, with `mcp.commands:[{channel,command}]`. New Reminders runtime verification uses the strict bounded JSON parser, rejects duplicate keys/nonfinite values, requires the owned `0700` profile directory and owned `0600` single-link regular file, and compares the sole `main` command text exactly with the canonical `shlex.join` output for the fixed configured Reminder adapter. Extra targets/channels, alternate HTTP, unsupported manual YAML and command drift suspend recovery. Existing Calendar profile ownership/path-mode handling stays compatible; its private-profile relocation remains deferred. This is a configured-target check within the trusted-user boundary, not an OS sandbox against same-user profile/configuration tampering.

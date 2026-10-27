@@ -118,10 +118,14 @@ do {
         guard args.filter({ $0 == "--enable-reminders" }).count <= 1 else { throw CoreError("invalid_configuration", "Duplicate Reminders activation flag") }
         let remindersEnabled = args.contains("--enable-reminders")
         let args = args.filter { $0 != "--enable-reminders" }
-        let allowed: Set<String> = ["--state-dir", "--backend", "--credential-binding", "--lifetime-fifo"]
-        guard [7, 9].contains(args.count), stride(from: 1, to: args.count, by: 2).allSatisfy({ allowed.contains(args[$0]) }), Set(stride(from: 1, to: args.count, by: 2).map { args[$0] }).count == (args.count - 1) / 2,
+        let allowed: Set<String> = remindersEnabled ? ["--state-dir", "--backend", "--credential-binding", "--lifetime-fifo", "--reminders-credential-binding"] : ["--state-dir", "--backend", "--credential-binding", "--lifetime-fifo"]
+        guard (remindersEnabled ? [9, 11] : [7, 9]).contains(args.count), stride(from: 1, to: args.count, by: 2).allSatisfy({ allowed.contains(args[$0]) }), Set(stride(from: 1, to: args.count, by: 2).map { args[$0] }).count == (args.count - 1) / 2,
               let statePath = flag("--state-dir", args), statePath.hasPrefix("/"),
               let mode = flag("--backend", args), ["eventkit", "synthetic"].contains(mode), let binding = flag("--credential-binding", args) else { throw CoreError("invalid_configuration", "Serve requires --state-dir absolute-path --backend eventkit|synthetic --credential-binding SHA256") }
+        let remindersBinding = flag("--reminders-credential-binding", args)
+        if remindersEnabled {
+            guard let remindersBinding, remindersBinding.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil, remindersBinding != binding else { throw CoreError("invalid_configuration", "Enabled Reminders requires a separate credential binding") }
+        }
         if let path = flag("--lifetime-fifo", args) {
             let lifetime = try LauncherLifetime(path: path)
             guard lifetime.launcherIsAlive() else { _exit(70) }
@@ -134,7 +138,7 @@ do {
         let broker = Broker(state: state, backend: backend)
         let reminders: ReminderBroker?
         if remindersEnabled {
-            let reminderState = try ReminderStateStore(directory: state.directory.appendingPathComponent("reminders", isDirectory: true), backendMode: mode, credentialBinding: binding)
+            let reminderState = try ReminderStateStore(directory: state.directory.appendingPathComponent("reminders", isDirectory: true), backendMode: mode, credentialBinding: remindersBinding!)
             let reminderBackend: any ReminderBackend = mode == "synthetic" ? SyntheticReminderBackend() : EventKitReminderBackend()
             reminders = ReminderBroker(state: reminderState, backend: reminderBackend)
         } else { reminders = nil }

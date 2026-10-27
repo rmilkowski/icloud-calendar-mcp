@@ -111,9 +111,16 @@ class NativeError(Exception):
 
 
 class NativeBroker:
-    def __init__(self, helper, state, backend="synthetic", timeout=45, credential_binding=None, *, _launch_services=None, enable_reminders=False):
+    def __init__(self, helper, state, backend="synthetic", timeout=45, credential_binding=None, *, _launch_services=None, enable_reminders=False, reminders_credential_binding=None):
         if type(enable_reminders) is not bool:
             raise ValueError("Reminders opt-in must be a boolean")
+        if enable_reminders:
+            if (type(reminders_credential_binding) is not str or len(reminders_credential_binding) != 64
+                    or any(character not in "0123456789abcdef" for character in reminders_credential_binding)
+                    or reminders_credential_binding == credential_binding):
+                raise ValueError("Enabled Reminders requires an independent native credential binding")
+        elif reminders_credential_binding is not None:
+            raise ValueError("Disabled Reminders cannot accept a credential binding")
         helper = Path(helper).expanduser().resolve(strict=True)
         if not helper.is_file() or not os.access(helper, os.X_OK):
             raise ValueError("Native helper must be an executable file")
@@ -123,7 +130,7 @@ class NativeBroker:
         self.reminders_enabled = enable_reminders
         command = [str(helper), "--serve", "--state-dir", str(state), "--backend", backend]
         if enable_reminders:
-            command.append("--enable-reminders")
+            command.extend(["--enable-reminders", "--reminders-credential-binding", reminders_credential_binding])
         if credential_binding is not None:
             command.extend(["--credential-binding", credential_binding])
         # The private test override may exercise LaunchServices with synthetic

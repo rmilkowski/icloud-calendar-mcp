@@ -317,6 +317,7 @@ class AdapterTests(unittest.TestCase):
             with self.subTest(response=bad):
                 client = GatewayClient.__new__(GatewayClient)
                 client.token, client.port, client.state = "synthetic-fixture-token", 8765, "synthetic-state"
+                client.resource, client.mcp_path, client.status_path = "calendar", "/mcp", "/status"
                 responses = [Connection(Response(bad)), Connection(Response(b'{"jsonrpc":"2.0","id":2,"result":{}}'))]
                 sink = io.BytesIO()
                 source = io.BytesIO(b"".join(json.dumps(request("ping", identifier=index)).encode() + b"\n" for index in (1, 2)))

@@ -55,7 +55,7 @@ class UnixGatewayServer(BoundedRequests, HTTPServer):
         super().__init__(str(path), Handler, bind_and_activate=False)
 
     def __getattr__(self, name):
-        if name in ("token", "protocol", "authority", "origin"):
+        if name in ("token", "protocol", "reminders_token", "reminders_protocol", "authority", "origin"):
             return getattr(self.owner, name)
         raise AttributeError(name)
 
@@ -74,7 +74,18 @@ class UnixGatewayServer(BoundedRequests, HTTPServer):
 
 
 class GatewayServer(BoundedRequests, HTTPServer):
-    def __init__(self, port, token, protocol, state_directory=None):
+    def __init__(self, port, token, protocol, state_directory=None, *, reminders_token=None, reminders_protocol=None):
+        if getattr(protocol, "resource", None) != "calendar":
+            raise ValueError("The default gateway requires a Calendar-only protocol")
+        if (reminders_token is None) != (reminders_protocol is None):
+            raise ValueError("Reminders requires both its own credential and protocol")
+        if reminders_protocol is not None:
+            if getattr(reminders_protocol, "resource", None) != "reminders" or reminders_protocol.broker is not protocol.broker:
+                raise ValueError("Resource protocols must share one native owner")
+            if type(reminders_token) is not str or not reminders_token or hmac.compare_digest(token, reminders_token):
+                raise ValueError("Resource credentials must be distinct")
+        self.reminders_token = reminders_token
+        self.reminders_protocol = reminders_protocol
         self.token = token
         self.protocol = protocol
         self.slots = threading.BoundedSemaphore(8)
@@ -235,32 +246,31 @@ class Handler(BaseHTTPRequestHandler):
 
     def route(self):
         self.close_connection = True
+        reminder_route = self.path in ("/reminders/mcp", "/reminders/status") and self.server.reminders_protocol is not None
+        token = self.server.reminders_token if reminder_route else self.server.token
+        protocol = self.server.reminders_protocol if reminder_route else self.server.protocol
         auth = self.headers.get_all("Authorization", [])
         supplied = auth[0] if len(auth) == 1 else ""
-        if not hmac.compare_digest(supplied.encode("utf-8"), ("Bearer " + self.server.token).encode("ascii")):
+        if not hmac.compare_digest(supplied.encode("utf-8"), ("Bearer " + token).encode("ascii")):
             self.reply(401, {"error": "Authentication required"}, WWW_Authenticate='Bearer realm="calendar-local"')
             return
         hosts, origins = self.headers.get_all("Host", []), self.headers.get_all("Origin", [])
         if hosts != [self.server.authority] or len(origins) > 1 or (origins and origins != [self.server.origin]):
             self.reply(403, {"error": "Host or Origin rejected"})
             return
-        if self.path == "/status":
+        if self.path == ("/reminders/status" if reminder_route else "/status"):
             if self.command != "GET":
                 self.reply(405, {"error": "Only GET is supported for local diagnostics"}, Allow="GET")
                 return
+            field = "reminders" if reminder_route else "native"
             try:
-                native = self.server.protocol.broker.authorization_status()
-                payload = {"gateway": "reachable", "native": native}
-                if getattr(self.server.protocol.broker, "reminders_enabled", False) is True:
-                    try:
-                        payload["reminders"] = self.server.protocol.broker.reminders_authorization_status()
-                    except NativeError as exc:
-                        payload["reminders"] = {"error": {"code": exc.code, "message": str(exc)}}
-                self.reply(200, payload)
+                native = (protocol.broker.reminders_authorization_status() if reminder_route else
+                          protocol.broker.authorization_status())
+                self.reply(200, {"gateway": "reachable", field: native})
             except NativeError as exc:
-                self.reply(503, {"gateway": "reachable", "native": {"error": {"code": exc.code, "message": str(exc)}}})
+                self.reply(503, {"gateway": "reachable", field: {"error": {"code": exc.code, "message": str(exc)}}})
             return
-        if self.path != "/mcp":
+        if self.path != ("/reminders/mcp" if reminder_route else "/mcp"):
             self.reply(404, {"error": "Not found"})
             return
         if self.command != "POST":
@@ -300,5 +310,5 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, TimeoutError):
             self.reply(408, {"error": "Request timeout"})
             return
-        result = self.server.protocol.handle(request)
+        result = protocol.handle(request)
         self.reply(202 if result is None else 200, result)

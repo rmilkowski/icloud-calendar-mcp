@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 import argparse
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,10 @@ def main(argv=None):
         item.add_argument("--state-dir", type=Path, default=DEFAULT_STATE)
         if command != "init":
             item.add_argument("--port", type=int, default=8765)
+        if command == "init":
+            item.add_argument("--enable-reminders", action="store_true", help="Explicitly initialize a separate Reminders credential")
+        if command in ("stdio", "status"):
+            item.add_argument("--resource", choices=("calendar", "reminders"), default="calendar")
         if command == "serve":
             item.add_argument("--helper", type=Path, required=True)
             item.add_argument("--backend", choices=("eventkit", "synthetic"), default="synthetic")
@@ -42,28 +47,37 @@ def main(argv=None):
             return reminders.dispatch(args)
         elif args.command == "init":
             initialize(args.state_dir)
+            if args.enable_reminders:
+                initialize(args.state_dir, resource="reminders")
             print("Private local credential ready; contents were not displayed.")
         elif args.command == "stdio":
-            return run_stdio(GatewayClient(args.state_dir, args.port))
+            return run_stdio(GatewayClient(args.state_dir, args.port, resource=args.resource))
         elif args.command == "status":
-            reply = GatewayClient(args.state_dir, args.port).status()
-            if not isinstance(reply, dict) or reply.get("gateway") != "reachable" or not isinstance(reply.get("native"), dict):
+            reply = GatewayClient(args.state_dir, args.port, resource=args.resource).status()
+            field = "native" if args.resource == "calendar" else "reminders"
+            if not isinstance(reply, dict) or reply.get("gateway") != "reachable" or not isinstance(reply.get(field), dict):
                 raise ValueError("Unexpected gateway status response")
             print(json.dumps(reply))
-            return 1 if "error" in reply["native"] else 0
+            return 1 if "error" in reply[field] else 0
         else:
             from .security import read_token
             if not 1 <= args.port <= 65535:
                 raise ValueError("Invalid local port")
             state = private_directory(args.state_dir)
             token = read_token(state)
+            reminder_token = read_token(state, "reminders") if args.enable_reminders else None
+            if reminder_token is not None and hmac.compare_digest(token, reminder_token):
+                raise ValueError("Resource credentials must be distinct")
             # Separate native state, private credential cannot be confused with signing state.
             native_state = private_directory(state / ("native-" + args.backend))
             broker = NativeBroker(args.helper, native_state, args.backend,
                                   credential_binding=hashlib.sha256(token.encode("ascii")).hexdigest(),
-                                  enable_reminders=args.enable_reminders)
+                                  enable_reminders=args.enable_reminders,
+                                  reminders_credential_binding=hashlib.sha256(reminder_token.encode("ascii")).hexdigest() if reminder_token is not None else None)
             try:
-                with GatewayServer(args.port, token, Protocol(broker), state_directory=state) as server:
+                with GatewayServer(args.port, token, Protocol(broker), state_directory=state,
+                                   reminders_token=reminder_token,
+                                   reminders_protocol=Protocol(broker, resource="reminders") if args.enable_reminders else None) as server:
                     def stop(signum, frame):
                         raise KeyboardInterrupt()
                     signal.signal(signal.SIGTERM, stop)
