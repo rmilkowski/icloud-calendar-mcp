@@ -2,6 +2,8 @@
 
 A personal macOS Calendar integration for ChatGPT and local MCP clients. It uses calendars already configured on the Mac, including iCloud, through EventKit. Connect locally or through the official private Secure MCP Tunnel; no iCloud password or model API key is required.
 
+Remote access requires an always-on, internet-connected Mac, kept awake with the calendar owner logged in. The MCP server and tunnel run under that user's account. Once connected in ChatGPT or configured in a compatible Codex client, you can access that user's calendars from other devices, including your phone.
+
 **Start here: [Quick install](docs/quick-install.md)** · [Full setup and operation](docs/setup.md) · [Architecture and safety contracts](docs/architecture.md)
 
 ## What it supports
