@@ -103,6 +103,8 @@ Calendar `status` remains Calendar-only. Reminders status is separately authenti
 
 ## Supported data and changes
 
+Tool descriptions summarize each action and its material limits. Shared preview/confirmation, retry and journal guidance appears in the Reminders initialization instructions; complete signed preview arguments remain visible and unchanged. Host selection, confirmation rendering and actual use still need attended validation; this wording does not guarantee acceptance or remove host warnings.
+
 Use `list_reminder_lists`, `query_reminders` and `get_reminder` to identify one opaque reminder/list identity. Queries require one list, return at most 100 complete records and a truthful `truncated` flag, and have no pagination/all-results promise. Narrow filters when truncated. List discovery fails rather than silently dropping lists beyond 200. Recurring and unsupported-component reminders remain explicit in reads but are ineligible for writes, including complete/reopen. Unrepresentable dates are not silently treated as undated.
 
 Writable fields are title, notes, integer priority 0–9, independently optional start/due components, and optional explicit absolute display alerts. Dates are null or exactly `{date,time,time_zone}`: a Gregorian `YYYY-MM-DD`, null or `HH:MM:SS` time, and null or IANA zone. Null time is date-only; null zone is floating. Named timed DST gaps/folds are rejected. There is no fabricated event end/duration or required start for a due date.
