@@ -8,7 +8,7 @@ Use macOS 14+, Swift 6/Xcode Command Line Tools and Python 3.11+ with timezone d
 
 ```sh
 cd "/absolute/path/to/iCloud Calendar MCP"
-swift test
+./scripts/test-native
 ./scripts/build-helper.sh
 python3 -m unittest discover -s Tests -v
 ```

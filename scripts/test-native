@@ -1,0 +1,263 @@
+#!/usr/bin/env python3
+"""Run synthetic XCTest coverage with SwiftPM workers and private benchmark records."""
+import argparse
+from collections import Counter
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+
+REPO = Path(__file__).resolve().parent.parent
+HELPER_ENV = ("CALENDAR_MCP_TEST_HELPER", "CALENDAR_MCP_FROZEN_FLOOR6_HELPER", "CALENDAR_LEGACY_HELPER")
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def source_identity(repo):
+    paths = [repo / "Package.swift", *sorted((repo / "Sources").rglob("*")),
+             *sorted((repo / "Tests/CalendarHelperTests").glob("*.swift"))]
+    records = {str(path.relative_to(repo)): digest(path) for path in paths if path.is_file()}
+    return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+
+
+def source_inventory(directory):
+    inventory = []
+    for path in sorted(directory.glob("*.swift")):
+        text = path.read_text()
+        classes = re.findall(r"^final class (\w+): XCTestCase \{", text, re.M)
+        methods = re.findall(r"^    func (test\w+)\(", text, re.M)
+        if len(classes) != 1 or not methods:
+            raise ValueError("Native inventory requires one XCTestCase per source file with discoverable test methods")
+        inventory.extend(f"{classes[0]}/{method}" for method in methods)
+    if not inventory or len(set(inventory)) != len(inventory):
+        raise ValueError("Native test inventory is empty or duplicated")
+    return sorted(inventory)
+
+
+def report_results(path, expected):
+    result = {"tests": 0, "skipped": 0, "failures": 0, "report_format": "xunit", "inventory_errors": []}
+    try:
+        cases = ET.parse(path).getroot().findall(".//testcase")
+    except (OSError, ET.ParseError):
+        result["inventory_errors"] = ["Missing or malformed xUnit report"]
+        return result
+    actual = []
+    for case in cases:
+        classname = case.get("classname", "").rsplit(".", 1)[-1]
+        method = case.get("name", "").removesuffix("()")
+        actual.append(f"{classname}/{method}")
+    counts = Counter(actual)
+    result.update(tests=len(cases), skipped=sum(case.find("skipped") is not None for case in cases),
+                  failures=sum(case.find("failure") is not None or case.find("error") is not None for case in cases))
+    missing, unexpected = sorted(set(expected) - counts.keys()), sorted(counts.keys() - set(expected))
+    duplicates = sorted(name for name, count in counts.items() if count != 1)
+    for kind, values in (("missing", missing), ("unexpected", unexpected), ("duplicated", duplicates)):
+        if values:
+            result["inventory_errors"].append({kind: values})
+    return result
+
+
+def serial_results(path, expected):
+    result = {"tests": 0, "skipped": 0, "failures": 0, "report_format": "serial_log", "inventory_errors": []}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        result["inventory_errors"] = ["Missing serial XCTest log"]
+        return result
+    errors, starts, completed = [], [], []
+    terminal_statuses = []
+    active = None
+    suite_starts, suite_ends = [], []
+    case_pattern = re.compile(r"^Test Case '-\[(CalendarHelperTests\.\w+) (test\w+)\]' (started|passed|failed|skipped)(.*)$")
+    aggregate_pattern = re.compile(
+        r"^\s*Executed (\d+) tests?, with (?:(\d+) tests? skipped and )?(\d+) failures? "
+        r"\((\d+) unexpected\) in (\d+(?:\.\d+)?)(?: \(\d+(?:\.\d+)?\))? seconds$")
+    for index, line in enumerate(lines):
+        if re.fullmatch(r"Test Suite 'All tests' started at .+\.", line):
+            suite_starts.append(index)
+        elif re.fullmatch(r"Test Suite 'All tests' (passed|failed) at .+\.", line):
+            suite_ends.append(index)
+        elif line.lstrip().startswith("Test Suite 'All tests'"):
+            errors.append("Unrecognized All tests suite line")
+        if not line.lstrip().startswith("Test Case"):
+            continue
+        match = case_pattern.fullmatch(line)
+        if not match:
+            errors.append("Unrecognized XCTest case line")
+            continue
+        classname, method, status, tail = match.groups()
+        identity = classname.rsplit(".", 1)[-1] + "/" + method
+        if not suite_starts or suite_ends:
+            errors.append("Case event outside the All tests suite")
+        if status == "started":
+            if tail != "." or active is not None:
+                errors.append("Invalid or overlapping testcase start")
+            starts.append(identity)
+            active = identity
+        else:
+            if not re.fullmatch(r" \(\d+(?:\.\d+)? seconds\)\.", tail):
+                errors.append("Unrecognized XCTest terminal syntax")
+            if active != identity:
+                errors.append("Completion without its matching start")
+            completed.append(identity)
+            terminal_statuses.append(status)
+            active = None
+    if active is not None:
+        errors.append("Unfinished XCTest case")
+    for kind, identities in (("started", starts), ("completed", completed)):
+        counts = Counter(identities)
+        missing = sorted(set(expected) - counts.keys())
+        unexpected = sorted(counts.keys() - set(expected))
+        duplicates = sorted(name for name, count in counts.items() if count != 1)
+        for issue, values in (("missing", missing), ("unexpected", unexpected), ("duplicated", duplicates)):
+            if values:
+                errors.append({kind + "_" + issue: values})
+    result.update(tests=len(completed), skipped=terminal_statuses.count("skipped"), failures=terminal_statuses.count("failed"))
+    if len(suite_starts) != 1 or len(suite_ends) != 1 or suite_starts[0] >= suite_ends[0]:
+        errors.append("Expected exactly one complete All tests suite")
+    else:
+        end = suite_ends[0]
+        aggregate = aggregate_pattern.fullmatch(lines[end + 1]) if end + 1 < len(lines) else None
+        if not aggregate:
+            errors.append("Missing or malformed final All tests aggregate")
+        else:
+            count, skipped, failures, unexpected, seconds = aggregate.groups()
+            result["test_seconds"] = float(seconds)
+            result["aggregate"] = {"tests": int(count), "skipped": int(skipped or 0), "failures": int(failures), "unexpected": int(unexpected)}
+            if any(result[key] != result["aggregate"][key] for key in ("tests", "skipped", "failures")):
+                errors.append("Final aggregate disagrees with terminal cases")
+            if int(unexpected) > int(failures):
+                errors.append("Invalid unexpected-failure aggregate")
+            passed = "'All tests' passed at " in lines[end]
+            if not passed or result["failures"]:
+                errors.append("All tests suite did not pass")
+    result["inventory_errors"] = errors
+    return result
+
+
+def positive(value):
+    result = int(value)
+    if not 1 <= result <= 32:
+        raise argparse.ArgumentTypeError("workers must be between 1 and 32")
+    return result
+
+
+def test_binary(scratch):
+    candidates = [path for path in (scratch / "debug").glob("*.xctest/Contents/MacOS/*")
+                  if path.is_file() and os.access(path, os.X_OK)]
+    if len(candidates) != 1:
+        raise ValueError("Expected exactly one executable in the built XCTest bundle")
+    return candidates[0].resolve()
+
+
+def build_binding(source_hash, binary, helper):
+    return {"source_sha256": source_hash, "test_binary_sha256": digest(binary),
+            "test_binary_path": str(binary), "helper_sha256": digest(helper), "helper_path": str(helper)}
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="test-native", description=__doc__)
+    parser.add_argument("--workers", type=positive, default=8, help="XCTest workers; 1 runs serially (default: 8)")
+    parser.add_argument("--mode", choices=("stress", "routine"), default="stress",
+                        help="stress preserves the original 600 rejection/800 replay workload")
+    parser.add_argument("--scratch-path", type=Path, default=REPO / ".build/native-tests")
+    parser.add_argument("--output-dir", type=Path, help="new directory for private logs, xUnit and summary")
+    parser.add_argument("--skip-build", action="store_true", help="reuse this runner's matching source/build manifest")
+    parser.add_argument("--strict-compatibility", action="store_true", help="require all frozen helpers and zero skipped tests")
+    args = parser.parse_args()
+    os.umask(0o077)
+    scratch = args.scratch_path.resolve()
+    output = args.output_dir.resolve() if args.output_dir else Path(tempfile.mkdtemp(prefix="calendar-native-tests-"))
+    if args.output_dir:
+        output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    # Do not pass unrelated runtime credentials into test workers or their crash logs.
+    allowed = {"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+               "SDKROOT", "DEVELOPER_DIR", "TOOLCHAINS", "MACOSX_DEPLOYMENT_TARGET", "CPATH",
+               "LIBRARY_PATH", "CLANG_MODULE_CACHE_PATH", "SWIFTPM_MODULECACHE_OVERRIDE", *HELPER_ENV}
+    env = {key: value for key, value in os.environ.items() if key in allowed}
+    env["CALENDAR_MCP_TEST_WORKLOAD"] = args.mode
+    env.setdefault("CLANG_MODULE_CACHE_PATH", str(scratch / "clang-cache"))
+    env.setdefault("SWIFTPM_MODULECACHE_OVERRIDE", str(scratch / "swift-cache"))
+    helper = Path(env.get("CALENDAR_MCP_TEST_HELPER", scratch / "debug/CalendarHelper")).resolve()
+    env["CALENDAR_MCP_TEST_HELPER"] = str(helper)
+    frozen = sorted({Path(match) for path in (REPO / "Tests/CalendarHelperTests").glob("*.swift")
+                     for match in re.findall(r'let frozen = "([^"]+)"', path.read_text())})
+    pins = {name: Path(env[name]).resolve() for name in HELPER_ENV if name in env}
+    if args.strict_compatibility:
+        missing = [name for name in HELPER_ENV if name not in pins]
+        if missing:
+            parser.error("strict compatibility requires " + ", ".join(missing))
+        for path in [*pins.values(), *frozen]:
+            if path != helper and not (path.is_file() and os.access(path, os.X_OK)):
+                parser.error("a required frozen helper is missing or not executable")
+    expected = source_inventory(REPO / "Tests/CalendarHelperTests")
+    source_hash = source_identity(REPO)
+    manifest = scratch / "test-native-build.json"
+    common = ["--package-path", str(REPO), "--scratch-path", str(scratch), "--disable-sandbox"]
+    build_seconds = 0.0
+    if not args.skip_build:
+        started = time.perf_counter()
+        with (output / "build.log").open("wb") as log:
+            result = subprocess.run(["swift", "build", "--build-tests", *common], cwd=REPO, env=env,
+                                    stdout=log, stderr=subprocess.STDOUT)
+        build_seconds = time.perf_counter() - started
+        if result.returncode:
+            print(f"Native test build failed; private log: {output / 'build.log'}", file=sys.stderr)
+            return result.returncode
+    try:
+        binary = test_binary(scratch)
+        helper = helper.resolve()
+        env["CALENDAR_MCP_TEST_HELPER"] = str(helper)
+        pins["CALENDAR_MCP_TEST_HELPER"] = helper
+        if not (helper.is_file() and os.access(helper, os.X_OK)):
+            raise ValueError("Built synthetic helper missing")
+        binding = build_binding(source_hash, binary, helper)
+        if source_identity(REPO) != source_hash:
+            raise ValueError("Native sources changed during preparation")
+        if args.skip_build:
+            if json.loads(manifest.read_text()) != binding:
+                raise ValueError("Source/build manifest is stale; rebuild before benchmarking")
+        else:
+            manifest.write_text(json.dumps(binding, indent=2) + "\n")
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    artifacts = {"test_binary": {"path": str(binary), "sha256": digest(binary)},
+                 "helpers": {name: {"path": str(path), "sha256": digest(path)} for name, path in pins.items() if path.is_file()},
+                 "frozen_fixtures": [{"path": str(path), "sha256": digest(path)} for path in frozen if path.is_file()]}
+    report = output / "results.xml"
+    command = ["swift", "test", *common, "--skip-build", "--xunit-output", str(report)]
+    command += ["--parallel", "--num-workers", str(args.workers)] if args.workers > 1 else ["--no-parallel"]
+    started = time.perf_counter()
+    with (output / "tests.log").open("wb") as log:
+        result = subprocess.run(command, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT)
+    execution_seconds = time.perf_counter() - started
+    summary = {"mode": args.mode, "workers": args.workers, "command": command,
+               "build_seconds": build_seconds, "execution_seconds": execution_seconds,
+               "exit_code": result.returncode, "strict_compatibility": args.strict_compatibility,
+               "workload_counts": {"rejections": 600, "replays": 800} if args.mode == "stress" else {"rejections": 60, "replays": 80},
+               "source_sha256": source_hash, "expected_inventory": expected,
+               "inventory_sha256": hashlib.sha256("\n".join(expected).encode()).hexdigest(), **artifacts}
+    # Persist subprocess evidence even when XML is absent or malformed.
+    summary_path = output / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    summary.update(serial_results(output / "tests.log", expected) if args.workers == 1 else report_results(report, expected))
+    summary["build_unchanged"] = source_identity(REPO) == source_hash and build_binding(source_hash, binary, helper) == binding
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    print(f"{args.mode}: {summary['tests']} tests, {summary['failures']} failures, {summary['skipped']} skipped; execution {execution_seconds:.3f}s, build {build_seconds:.3f}s")
+    print(f"Private benchmark record: {summary_path}")
+    if (result.returncode or summary["failures"] or summary["inventory_errors"] or not summary["build_unchanged"]
+            or (args.strict_compatibility and summary["skipped"])):
+        return result.returncode or 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

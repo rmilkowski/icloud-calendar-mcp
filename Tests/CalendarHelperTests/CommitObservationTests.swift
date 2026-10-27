@@ -21,27 +21,36 @@ final class CommitObservationTests: XCTestCase {
     private func sql(_ state: StateStore, _ query: String) throws -> [[String]] { try state.rows(query) }
     private func counters(_ state: StateStore) throws -> [JSON] { try state.commitObservationStatus()["observations"].array! }
 
+    private func workload() throws -> (rejected: Int, restarted: Int, replays: Int) {
+        let mode = ProcessInfo.processInfo.environment["CALENDAR_MCP_TEST_WORKLOAD"] ?? "stress"
+        switch mode {
+        case "stress": return (500, 100, 400)
+        case "routine": return (50, 10, 40)
+        default: throw CoreError("invalid_configuration", "Expected stress or routine test workload")
+        }
+    }
+
     func testRejectedArbitraryOperationsHaveFixedStorageAndExactCountsAcrossRestart() throws {
-        let dir = directory(), now = try parseDate("2026-10-24T12:00:00Z")
+        let dir = directory(), now = try parseDate("2026-10-24T12:00:00Z"), workload = try workload()
         var baseline: [JSON] = []
         do {
             let state = try store(dir), broker = Broker(state: state, backend: SyntheticBackend(), now: { now })
             baseline = try state.auditRecords()
-            for index in 0..<500 {
+            for index in 0..<workload.rejected {
                 XCTAssertEqual(call(broker, "commit_attacker_\(index)_" + String(repeating: "secret", count: 20))["error"]["code"], .string("unknown_operation"))
             }
             XCTAssertEqual(try state.auditRecords(), baseline)
             let counts = try counters(state)
             XCTAssertEqual(counts.count, 1); XCTAssertEqual(counts[0]["operation"], .string("other_commit"))
-            XCTAssertEqual(counts[0]["reason"], .string("invalid_request")); XCTAssertEqual(counts[0]["count"], .int(500))
-            XCTAssertEqual(counts[0]["pending_count"], .int(500))
+            XCTAssertEqual(counts[0]["reason"], .string("invalid_request")); XCTAssertEqual(counts[0]["count"], .int(workload.rejected))
+            XCTAssertEqual(counts[0]["pending_count"], .int(workload.rejected))
             XCTAssertFalse(try state.commitObservationStatus().text().contains("attacker"))
         }
         do {
             let state = try store(dir), broker = Broker(state: state, backend: SyntheticBackend(), now: { now.addingTimeInterval(-86400) })
-            for _ in 0..<100 { _ = call(broker, "commit_more_attacker_text") }
+            for _ in 0..<workload.restarted { _ = call(broker, "commit_more_attacker_text") }
             XCTAssertEqual(try state.auditRecords(), baseline)
-            XCTAssertEqual(try counters(state)[0]["count"], .int(600))
+            XCTAssertEqual(try counters(state)[0]["count"], .int(workload.rejected + workload.restarted))
             XCTAssertEqual(try counters(state)[0]["last_at"], .string(iso(now)))
             try state.maintainCommitObservations(now: now.addingTimeInterval(3599))
             XCTAssertEqual(try state.auditRecords(), baseline)
@@ -53,7 +62,7 @@ final class CommitObservationTests: XCTestCase {
             XCTAssertEqual(checkpoint["event"], .string("commit_observation_checkpoint"))
             XCTAssertEqual(checkpoint["approval_source"], .string("native_maintenance"))
             XCTAssertEqual(checkpoint["approval_evidence"], .string("not_provided"))
-            XCTAssertEqual(checkpoint["payload"]["observations"].array![0]["count"], .int(600))
+            XCTAssertEqual(checkpoint["payload"]["observations"].array![0]["count"], .int(workload.rejected + workload.restarted))
             XCTAssertEqual(try counters(state)[0]["pending_count"], .int(0))
             try state.verifyAudit()
         }
@@ -74,7 +83,7 @@ final class CommitObservationTests: XCTestCase {
     }
 
     func testReplayedRequestsPreserveImmutableHistoryQuotaAndRecordedResults() throws {
-        let dir = directory(), now = try parseDate("2026-10-24T12:00:00Z")
+        let dir = directory(), now = try parseDate("2026-10-24T12:00:00Z"), workload = try workload()
         let state = try store(dir), backend = SyntheticBackend(), broker = Broker(state: state, backend: backend, now: { now })
         let calendar = call(broker, "list_calendars")["result"]["calendars"].array![0]["id"]
         let preview = call(broker, "preflight_change", ["action": .string("create"), "scope": .string("this"), "calendar_id": calendar, "fields": .object(["title": .string("Synthetic"), "start": .string("2026-10-25T10:00:00Z"), "end": .string("2026-10-25T11:00:00Z")])])["result"]["preview"]
@@ -86,7 +95,7 @@ final class CommitObservationTests: XCTestCase {
         _ = try state.append(event: "commit_replayed", nonce: modification["envelope"]["nonce"].string, payload: modified["result"])
         _ = try state.append(event: "commit_rejected", nonce: nil, payload: .object(["op": .string("commit_delete"), "code": .string("invalid_preview")]))
         let audit = try state.auditRecords(), executions = try sql(state, "SELECT * FROM executions ORDER BY nonce"), claims = try sql(state, "SELECT * FROM write_safety_claims ORDER BY nonce")
-        for _ in 0..<400 {
+        for _ in 0..<workload.replays {
             XCTAssertEqual(call(broker, "commit_modify", ["preview": modification]), modified)
             XCTAssertEqual(call(broker, "commit_create", ["preview": preview]), created)
         }
@@ -96,7 +105,7 @@ final class CommitObservationTests: XCTestCase {
         XCTAssertEqual(try sql(state, "SELECT * FROM write_safety_claims ORDER BY nonce"), claims)
         XCTAssertEqual(claims.count, 1)
         let replayed = try counters(state)
-        XCTAssertEqual(replayed.count, 2); XCTAssertTrue(replayed.allSatisfy { $0["kind"] == .string("replayed") && $0["count"] == .int(400) })
+        XCTAssertEqual(replayed.count, 2); XCTAssertTrue(replayed.allSatisfy { $0["kind"] == .string("replayed") && $0["count"] == .int(workload.replays) })
         try state.maintainCommitObservations(now: now.addingTimeInterval(3600))
         XCTAssertEqual(try state.auditRecords().count, audit.count + 1)
         XCTAssertEqual(Array(try state.auditRecords().prefix(audit.count)), audit)
@@ -162,9 +171,12 @@ final class CommitObservationTests: XCTestCase {
         let state = try store(directory()), now = try parseDate("2026-10-24T12:00:00Z")
         let ancestor = UUID().uuidString, middle = UUID().uuidString, unknown = UUID().uuidString
         // Large resolved history has no role in unresolved retention traversal.
-        for index in 0..<1500 {
-            let marker: JSON = .object(["storage_version": .int(2), "action": .string("create"), "payload_digest": .string(String(repeating: "a", count: 64))])
-            try state.execute("INSERT INTO executions VALUES(?,?,'applied',?,?)", ["resolved-\(index)", try marker.text(), try JSON.object(["storage_version": .int(2), "state": .string("applied")]).text(), iso(now)])
+        let marker = try JSON.object(["storage_version": .int(2), "action": .string("create"), "payload_digest": .string(String(repeating: "a", count: 64))]).text()
+        let result = try JSON.object(["storage_version": .int(2), "state": .string("applied")]).text(), created = iso(now)
+        try state.transaction {
+            for index in 0..<1500 {
+                try state.execute("INSERT INTO executions VALUES(?,?,'applied',?,?)", ["resolved-\(index)", marker, result, created])
+            }
         }
         func insert(_ nonce: String, _ status: String, _ sources: [String]) throws {
             let payload: JSON = .object(["action": .string("create"), "rollback": .object(["source_change_ids": .array(sources.map(JSON.string))])])

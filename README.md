@@ -43,9 +43,9 @@ Synthetic tests do not prove every live provider or host behavior. Permission, s
 ## Development checks
 
 ```sh
-swift test
+./scripts/test-native
 ./scripts/build-helper.sh
 python3 -m unittest discover -s Tests -v
 ```
 
-Tests use synthetic providers and do not authorize Calendar access. Packaging replaces the local build bundle; use it only for a fresh or deliberately managed build. See [test and packaging options](docs/setup.md#2-build-sign-and-test-a-fresh-installation).
+The native runner uses eight workers and the full stress workload by default; `--mode routine` reduces only repetitive counter volume. Tests use synthetic providers and do not authorize Calendar access. Packaging replaces the local build bundle; use it only for a fresh or deliberately managed build. See [test and packaging options](docs/setup.md#2-build-sign-and-test-a-fresh-installation).

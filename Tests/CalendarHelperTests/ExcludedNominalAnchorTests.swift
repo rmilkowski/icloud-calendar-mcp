@@ -164,52 +164,107 @@ final class ExcludedNominalAnchorTests: XCTestCase {
         XCTAssertNotEqual(call(broker, "commit_future_rollback", ["preview": restore])["error"], .null)
         XCTAssertEqual(backend.writeCount, 1); XCTAssertEqual(try state.rows("SELECT action FROM write_safety_claims"), [["modify"]])
     }
-    func testChangedOrMissingMasterAfterReviewRejectsBeforeIntent() throws {
-        for modify in [false, true] {
-            for mode in ["missing", "id", "calendar", "occurrence", "start", "detached", "nonrecurring", "rule", "fields"] {
-                let (state, backend, broker) = try fixture(), preview = try draft(broker, modify: modify)
-                changeMaster(backend, mode: mode)
-                XCTAssertNotEqual(commit(broker, preview, modify: modify)["error"], .null, mode)
-                XCTAssertEqual(backend.writeCount, 0); XCTAssertTrue(try state.rows("SELECT nonce FROM executions").isEmpty)
-                XCTAssertTrue(try state.rows("SELECT nonce FROM write_safety_claims").isEmpty)
-            }
-        }
+    private func assertMasterBeforeIntent(_ mode: String, modify: Bool) throws {
+        let (state, backend, broker) = try fixture(), preview = try draft(broker, modify: modify)
+        changeMaster(backend, mode: mode)
+        XCTAssertNotEqual(commit(broker, preview, modify: modify)["error"], .null, mode)
+        XCTAssertEqual(backend.writeCount, 0); XCTAssertTrue(try state.rows("SELECT nonce FROM executions").isEmpty)
+        XCTAssertTrue(try state.rows("SELECT nonce FROM write_safety_claims").isEmpty)
     }
-    func testChangedOrMissingPostMutationMasterRemainsUnknownWithExactReplay() throws {
-        for modify in [false, true] {
-            for mode in ["missing", "id", "calendar", "occurrence", "start", "detached", "nonrecurring", "rule", "fields"] {
-                let (state, backend, broker) = try fixture(), preview = try draft(broker, modify: modify)
-                backend.afterMutation = { self.changeMaster(backend, mode: mode) }
-                let result = commit(broker, preview, modify: modify)
+
+    private func assertMasterAfterMutation(_ mode: String, modify: Bool) throws {
+        let (state, backend, broker) = try fixture(), preview = try draft(broker, modify: modify)
+        backend.afterMutation = { self.changeMaster(backend, mode: mode) }
+        let result = commit(broker, preview, modify: modify)
+        XCTAssertEqual(result["result"]["state"], .string("unknown"), mode)
+        XCTAssertEqual(commit(broker, preview, modify: modify), result); XCTAssertEqual(backend.writeCount, 1)
+        XCTAssertEqual(try state.rows("SELECT count(*) FROM write_safety_claims"), [["1"]])
+    }
+
+    private func assertCopyMaster(_ mode: String, phase: String) throws {
+        let (state, backend, broker) = try fixture(), deleted = commit(broker, try draft(broker))
+        if phase == "review" {
+            changeMaster(backend, mode: mode)
+            XCTAssertNotEqual(call(broker, "preflight_rollback", ["change_ids": .array([deleted["result"]["nonce"]])])["error"], .null, mode)
+        } else {
+            let restore = try inverse(broker, deleted["result"]["nonce"])
+            if phase == "commit" { changeMaster(backend, mode: mode) }
+            if phase == "provider_entry" { backend.beforeRestore = { self.changeMaster(backend, mode: mode) } }
+            if phase == "post_save" { backend.afterRestore = { self.changeMaster(backend, mode: mode) } }
+            let result = commit(broker, restore, restore: true)
+            if phase == "commit" { XCTAssertNotEqual(result["error"], .null, mode) }
+            else {
                 XCTAssertEqual(result["result"]["state"], .string("unknown"), mode)
-                XCTAssertEqual(commit(broker, preview, modify: modify), result); XCTAssertEqual(backend.writeCount, 1)
-                XCTAssertEqual(try state.rows("SELECT count(*) FROM write_safety_claims"), [["1"]])
+                XCTAssertEqual(commit(broker, restore, restore: true), result)
             }
         }
+        XCTAssertEqual(backend.writeCount, phase == "post_save" ? 2 : 1)
+        XCTAssertEqual(try state.rows("SELECT count(*) FROM executions"), [[phase == "provider_entry" || phase == "post_save" ? "2" : "1"]])
+        XCTAssertEqual(try state.rows("SELECT action FROM write_safety_claims"), [["delete"]])
     }
-    func testIndependentCopyRechecksExcludedMasterBeforeIntentBeforeSaveAndAfterSave() throws {
-        for phase in ["review", "commit", "provider_entry", "post_save"] {
-            for mode in ["missing", "id", "calendar", "occurrence", "start", "rule", "fields"] {
-                let (state, backend, broker) = try fixture(), deleted = commit(broker, try draft(broker))
-                if phase == "review" {
-                    changeMaster(backend, mode: mode)
-                    XCTAssertNotEqual(call(broker, "preflight_rollback", ["change_ids": .array([deleted["result"]["nonce"]])])["error"], .null, mode)
-                } else {
-                    let restore = try inverse(broker, deleted["result"]["nonce"])
-                    if phase == "commit" { changeMaster(backend, mode: mode) }
-                    if phase == "provider_entry" { backend.beforeRestore = { self.changeMaster(backend, mode: mode) } }
-                    if phase == "post_save" { backend.afterRestore = { self.changeMaster(backend, mode: mode) } }
-                    let result = commit(broker, restore, restore: true)
-                    if phase == "commit" { XCTAssertNotEqual(result["error"], .null, mode) }
-                    else {
-                        XCTAssertEqual(result["result"]["state"], .string("unknown"), mode)
-                        XCTAssertEqual(commit(broker, restore, restore: true), result)
-                    }
-                }
-                XCTAssertEqual(backend.writeCount, phase == "post_save" ? 2 : 1)
-                XCTAssertEqual(try state.rows("SELECT count(*) FROM executions"), [[phase == "provider_entry" || phase == "post_save" ? "2" : "1"]])
-                XCTAssertEqual(try state.rows("SELECT action FROM write_safety_claims"), [["delete"]])
-            }
-        }
-    }
+
+    func testMasterBeforeIntentDeleteMissing() throws { try assertMasterBeforeIntent("missing", modify: false) }
+    func testMasterAfterMutationDeleteMissing() throws { try assertMasterAfterMutation("missing", modify: false) }
+    func testMasterBeforeIntentDeleteId() throws { try assertMasterBeforeIntent("id", modify: false) }
+    func testMasterAfterMutationDeleteId() throws { try assertMasterAfterMutation("id", modify: false) }
+    func testMasterBeforeIntentDeleteCalendar() throws { try assertMasterBeforeIntent("calendar", modify: false) }
+    func testMasterAfterMutationDeleteCalendar() throws { try assertMasterAfterMutation("calendar", modify: false) }
+    func testMasterBeforeIntentDeleteOccurrence() throws { try assertMasterBeforeIntent("occurrence", modify: false) }
+    func testMasterAfterMutationDeleteOccurrence() throws { try assertMasterAfterMutation("occurrence", modify: false) }
+    func testMasterBeforeIntentDeleteStart() throws { try assertMasterBeforeIntent("start", modify: false) }
+    func testMasterAfterMutationDeleteStart() throws { try assertMasterAfterMutation("start", modify: false) }
+    func testMasterBeforeIntentDeleteDetached() throws { try assertMasterBeforeIntent("detached", modify: false) }
+    func testMasterAfterMutationDeleteDetached() throws { try assertMasterAfterMutation("detached", modify: false) }
+    func testMasterBeforeIntentDeleteNonrecurring() throws { try assertMasterBeforeIntent("nonrecurring", modify: false) }
+    func testMasterAfterMutationDeleteNonrecurring() throws { try assertMasterAfterMutation("nonrecurring", modify: false) }
+    func testMasterBeforeIntentDeleteRule() throws { try assertMasterBeforeIntent("rule", modify: false) }
+    func testMasterAfterMutationDeleteRule() throws { try assertMasterAfterMutation("rule", modify: false) }
+    func testMasterBeforeIntentDeleteFields() throws { try assertMasterBeforeIntent("fields", modify: false) }
+    func testMasterAfterMutationDeleteFields() throws { try assertMasterAfterMutation("fields", modify: false) }
+    func testMasterBeforeIntentModifyMissing() throws { try assertMasterBeforeIntent("missing", modify: true) }
+    func testMasterAfterMutationModifyMissing() throws { try assertMasterAfterMutation("missing", modify: true) }
+    func testMasterBeforeIntentModifyId() throws { try assertMasterBeforeIntent("id", modify: true) }
+    func testMasterAfterMutationModifyId() throws { try assertMasterAfterMutation("id", modify: true) }
+    func testMasterBeforeIntentModifyCalendar() throws { try assertMasterBeforeIntent("calendar", modify: true) }
+    func testMasterAfterMutationModifyCalendar() throws { try assertMasterAfterMutation("calendar", modify: true) }
+    func testMasterBeforeIntentModifyOccurrence() throws { try assertMasterBeforeIntent("occurrence", modify: true) }
+    func testMasterAfterMutationModifyOccurrence() throws { try assertMasterAfterMutation("occurrence", modify: true) }
+    func testMasterBeforeIntentModifyStart() throws { try assertMasterBeforeIntent("start", modify: true) }
+    func testMasterAfterMutationModifyStart() throws { try assertMasterAfterMutation("start", modify: true) }
+    func testMasterBeforeIntentModifyDetached() throws { try assertMasterBeforeIntent("detached", modify: true) }
+    func testMasterAfterMutationModifyDetached() throws { try assertMasterAfterMutation("detached", modify: true) }
+    func testMasterBeforeIntentModifyNonrecurring() throws { try assertMasterBeforeIntent("nonrecurring", modify: true) }
+    func testMasterAfterMutationModifyNonrecurring() throws { try assertMasterAfterMutation("nonrecurring", modify: true) }
+    func testMasterBeforeIntentModifyRule() throws { try assertMasterBeforeIntent("rule", modify: true) }
+    func testMasterAfterMutationModifyRule() throws { try assertMasterAfterMutation("rule", modify: true) }
+    func testMasterBeforeIntentModifyFields() throws { try assertMasterBeforeIntent("fields", modify: true) }
+    func testMasterAfterMutationModifyFields() throws { try assertMasterAfterMutation("fields", modify: true) }
+    func testCopyMasterReviewMissing() throws { try assertCopyMaster("missing", phase: "review") }
+    func testCopyMasterReviewId() throws { try assertCopyMaster("id", phase: "review") }
+    func testCopyMasterReviewCalendar() throws { try assertCopyMaster("calendar", phase: "review") }
+    func testCopyMasterReviewOccurrence() throws { try assertCopyMaster("occurrence", phase: "review") }
+    func testCopyMasterReviewStart() throws { try assertCopyMaster("start", phase: "review") }
+    func testCopyMasterReviewRule() throws { try assertCopyMaster("rule", phase: "review") }
+    func testCopyMasterReviewFields() throws { try assertCopyMaster("fields", phase: "review") }
+    func testCopyMasterCommitMissing() throws { try assertCopyMaster("missing", phase: "commit") }
+    func testCopyMasterCommitId() throws { try assertCopyMaster("id", phase: "commit") }
+    func testCopyMasterCommitCalendar() throws { try assertCopyMaster("calendar", phase: "commit") }
+    func testCopyMasterCommitOccurrence() throws { try assertCopyMaster("occurrence", phase: "commit") }
+    func testCopyMasterCommitStart() throws { try assertCopyMaster("start", phase: "commit") }
+    func testCopyMasterCommitRule() throws { try assertCopyMaster("rule", phase: "commit") }
+    func testCopyMasterCommitFields() throws { try assertCopyMaster("fields", phase: "commit") }
+    func testCopyMasterProviderEntryMissing() throws { try assertCopyMaster("missing", phase: "provider_entry") }
+    func testCopyMasterProviderEntryId() throws { try assertCopyMaster("id", phase: "provider_entry") }
+    func testCopyMasterProviderEntryCalendar() throws { try assertCopyMaster("calendar", phase: "provider_entry") }
+    func testCopyMasterProviderEntryOccurrence() throws { try assertCopyMaster("occurrence", phase: "provider_entry") }
+    func testCopyMasterProviderEntryStart() throws { try assertCopyMaster("start", phase: "provider_entry") }
+    func testCopyMasterProviderEntryRule() throws { try assertCopyMaster("rule", phase: "provider_entry") }
+    func testCopyMasterProviderEntryFields() throws { try assertCopyMaster("fields", phase: "provider_entry") }
+    func testCopyMasterPostSaveMissing() throws { try assertCopyMaster("missing", phase: "post_save") }
+    func testCopyMasterPostSaveId() throws { try assertCopyMaster("id", phase: "post_save") }
+    func testCopyMasterPostSaveCalendar() throws { try assertCopyMaster("calendar", phase: "post_save") }
+    func testCopyMasterPostSaveOccurrence() throws { try assertCopyMaster("occurrence", phase: "post_save") }
+    func testCopyMasterPostSaveStart() throws { try assertCopyMaster("start", phase: "post_save") }
+    func testCopyMasterPostSaveRule() throws { try assertCopyMaster("rule", phase: "post_save") }
+    func testCopyMasterPostSaveFields() throws { try assertCopyMaster("fields", phase: "post_save") }
 }

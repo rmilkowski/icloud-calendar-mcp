@@ -33,7 +33,7 @@ Before granting access, verify that the intended accounts/calendars are visible 
 ## 2. Build, sign and test a fresh installation
 
 ```sh
-swift test
+./scripts/test-native
 ./scripts/build-helper.sh
 python3 -m unittest discover -s Tests -v
 ```
@@ -51,16 +51,39 @@ In managed Codex environments where nested SwiftPM `sandbox-exec` is unavailable
 ```sh
 env CLANG_MODULE_CACHE_PATH=/private/tmp/calendar-mcp-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/private/tmp/calendar-mcp-swift-cache \
-  swift build --disable-sandbox
-env CLANG_MODULE_CACHE_PATH=/private/tmp/calendar-mcp-clang-cache \
-  SWIFTPM_MODULECACHE_OVERRIDE=/private/tmp/calendar-mcp-swift-cache \
-  swift test --disable-sandbox
+  ./scripts/test-native --scratch-path /private/tmp/calendar-mcp-native-build
 env CLANG_MODULE_CACHE_PATH=/private/tmp/calendar-mcp-clang-cache \
   SWIFTPM_MODULECACHE_OVERRIDE=/private/tmp/calendar-mcp-swift-cache \
   ./scripts/build-helper.sh
 ```
 
 This disables SwiftPM's nested build sandbox, not the outer managed environment. The packaging script already selects this option. `swift build --show-bin-path` identifies the current toolchain's product directory; set `CALENDAR_MCP_TEST_HELPER` to that directory's `CalendarHelper` if test autodetection needs an override.
+
+The native runner uses SwiftPM's parallel XCTest support with eight workers and full stress counts by default. Use `--workers 1` for serial comparison, `--workers 4` to compare lower concurrency, or `--mode routine` for a separate lower-volume development lane. Stress retains 500 initial plus 100 post-restart rejections and 400 replays each of two operations; routine uses 50 plus 10 and 40 each. Both lanes keep all mutation-family/master-witness scenarios, quota and selection boundary checks, migrations, crash/restart and integrity assertions. Setup-only transactions seed the 1,500 unrelated retention rows and 130 dependency nodes, and construct completed synthetic legacy/audit-corruption fixtures. Invariant retention-seed JSON and timestamp text are serialized once. Actual claims, outcomes, expiry, corruption checks and crash-resumption steps retain their original boundaries; every scenario still initializes fresh protected state.
+
+The runner builds only into `.build/native-tests` by default and never packages or replaces the app. `--scratch-path` selects another build directory. For repeatable execution-only measurements, build once with the runner, then repeat `--skip-build` with the same path, mode, helper artifacts and worker count. Each run writes private build/test logs and a JSON summary, plus xUnit results for parallel runs with separate build/execution times and test/helper hashes; it reports skipped tests explicitly. Parallel xUnit case identities must match the source inventory; true serial runs instead require exact started/completed XCTest log identities and a consistent final All tests aggregate. Reports label their evidence format explicitly, and a source/test-binary/helper build manifest rejects stale `--skip-build` artifacts; partial reports cannot count as full-suite success. It forwards only selected toolchain and test-helper environment variables, excluding unrelated runtime credentials.
+
+For a release compatibility run, set `CALENDAR_MCP_FROZEN_FLOOR6_HELPER` and `CALENDAR_LEGACY_HELPER` to the frozen executables and use `--strict-compatibility`. The current synthetic helper defaults to the chosen scratch build's `debug/CalendarHelper`; `CALENDAR_MCP_TEST_HELPER` can pin another build. Strict mode requires those executables plus the immutable older fixtures referenced by the existing tests and rejects any skipped tests. A fresh checkout without those private fixtures can run the normal developer lane, whose summary records the existing compatibility skips. Do not label a run with missing compatibility fixtures a complete release validation.
+
+### Native test benchmarking
+
+Compare three execution-only runs per configuration using the same debug build mode, full stress workload, frozen compatibility helpers and socket permissions, with no overlapping heavy jobs. Use `--skip-build` only after the runner has built and bound the current sources/artifacts. Report the median execution time separately from compilation; do not substitute routine-mode timings for full-stress results.
+
+Measured debug execution times, excluding builds:
+
+| Full-stress configuration | Samples | Execution time |
+| --- | --- | --- |
+| Original serial suite | 3 | 91.482 s median |
+| Optimized true serial (`--workers 1`) | 1 | 84.777 s |
+| Optimized parallel (`--workers 8`) | 3 | 25.635 s median |
+
+The parallel median **reduces execution time by 71.98%** versus the original serial median. Baseline samples were 91.482/91.765/89.888 s; final eight-worker samples were 31.700/24.934/25.635 s. Both the baseline and serial control used SwiftPM's true `--no-parallel` execution. Its single sample indicates the nonparallel setup benefit without claiming a three-run median.
+
+Focused serial fixture timings also improved: the 1,500-row retention case went from a three-run median of 4.310 s to 0.111 s in the final serial control; the 130-node dependency case went from 0.498 s to 0.181 s. Actual durable operations and assertions remain outside the setup batches.
+
+Every final measured native run passed all 338 cases with zero failures/skips and exact inventory validation. The separate routine eight-worker sample was 23.928 s; it is not used for the full-stress performance claim. The Python suite passed 147 of 150 tests with its three existing packaged lifecycle skips; no new skips were added.
+
+The scheduling refactor exposes 338 XCTest methods instead of 204 while preserving the same scenarios: 15 mutation pre-entry families, all 15 × 4 uncertain-outcome combinations, and 18 pre-intent/18 post-mutation/28 independent-copy excluded-master combinations. Full stress retains all 600 rejection and 800 replay calls plus the 1,500-row retention and 130-node dependency fixtures. The quota 50/51, recovery selection 25/26, concurrent quota, crash/restart and frozen-writer checks are unchanged.
 
 Automated tests use synthetic providers and temporary state. Build/test commands do not authorize real Calendar access. HTTP tests need temporary protected Unix and private loopback listeners. Default tests skip explicit LaunchServices app-launch tests; after packaging, opt into those synthetic-only lifecycle tests with:
 

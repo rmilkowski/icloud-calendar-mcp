@@ -50,7 +50,6 @@ final class NotAppliedTests: XCTestCase {
     private var directories: [URL] = []
     private let boundary = "2026-11-01T10:00:00.000Z"
     private let clock = try! parseDate("2026-10-25T12:00:00.000Z")
-    private let families = ["create", "series_create", "modify", "delete", "alarms_inverse", "restore", "series", "series_inverse", "future", "future_inverse", "termination", "future_restore", "all_day_create", "all_day_modify", "all_day_inverse"]
     override func tearDown() { for directory in directories { try? FileManager.default.removeItem(at: directory) }; super.tearDown() }
     private func fixture() throws -> (StateStore, MutationEntryProbe, Broker) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("calendar-nonentry-" + UUID().uuidString); directories.append(directory)
@@ -117,49 +116,121 @@ final class NotAppliedTests: XCTestCase {
         let route = family == "series_inverse" ? "commit_series_rollback" : (family == "future_inverse" ? "commit_future_rollback" : (family == "future_restore" ? "commit_future_restore" : "commit_rollback"))
         return Scenario(tool: route, action: first["envelope"]["action"].string!, draft: draft)
     }
-    func testEveryWriteFamilyNativePreEntryFailureIsDurableReplayableAndFreshReviewCanProceed() throws {
-        for family in families {
-            let (state, probe, broker) = try fixture(), step = try scenario(family, broker), original = try step.draft()
-            let priorRows = try state.rows("SELECT count(*) FROM executions")[0][0], priorCalls = probe.calls
-            let priorCharges = Int(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0])!
-            probe.mode = "before"; probe.returned = false
-            let result = call(broker, step.tool, ["preview": original])
-            XCTAssertEqual(result["result"]["state"], .string("not_applied"), family)
-            XCTAssertEqual(result["result"]["execution_evidence"], StateStore.notEnteredEvidence)
-            XCTAssertEqual(probe.calls, priorCalls); XCTAssertFalse(try state.hasUnresolved())
-            XCTAssertEqual(call(broker, step.tool, ["preview": original]), result); XCTAssertEqual(probe.calls, priorCalls)
-            XCTAssertEqual(Int(try state.rows("SELECT count(*) FROM executions")[0][0]), Int(priorRows)! + 1)
-            XCTAssertEqual(Int(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0]), priorCharges + (step.action == "create" ? 0 : 1))
-            XCTAssertEqual(try state.auditRecords().filter { $0["event"] == .string("write_not_applied") }.count, 1)
-            probe.mode = "success"; probe.returned = false
-            let retry = call(broker, step.tool, ["preview": try step.draft()])
-            XCTAssertEqual(retry["result"]["state"], .string("applied"), family)
-            XCTAssertEqual(probe.calls, priorCalls + 1)
-            let events = call(broker, "query_events", ["start": .string("2026-11-02T00:00:00Z"), "end": .string("2026-11-03T00:00:00Z")])["result"]["events"].array!
-            let independent = try XCTUnwrap(events.first { $0["fields"]["title"] == .string("Independent fixture") })["id"]
-            let unrelated = try preview(broker, ["action": .string("modify"), "scope": .string("this"), "event_id": independent, "fields": .object(["notes": .string("Independent edit")])])
-            XCTAssertEqual(call(broker, "commit_modify", ["preview": unrelated])["result"]["state"], .string("applied"), family)
-            try state.verifyAudit()
-        }
+    private func assertPreEntry(_ family: String) throws {
+        let (state, probe, broker) = try fixture(), step = try scenario(family, broker), original = try step.draft()
+        let priorRows = try state.rows("SELECT count(*) FROM executions")[0][0], priorCalls = probe.calls
+        let priorCharges = Int(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0])!
+        probe.mode = "before"; probe.returned = false
+        let result = call(broker, step.tool, ["preview": original])
+        XCTAssertEqual(result["result"]["state"], .string("not_applied"), family)
+        XCTAssertEqual(result["result"]["execution_evidence"], StateStore.notEnteredEvidence)
+        XCTAssertEqual(probe.calls, priorCalls); XCTAssertFalse(try state.hasUnresolved())
+        XCTAssertEqual(call(broker, step.tool, ["preview": original]), result); XCTAssertEqual(probe.calls, priorCalls)
+        XCTAssertEqual(Int(try state.rows("SELECT count(*) FROM executions")[0][0]), Int(priorRows)! + 1)
+        XCTAssertEqual(Int(try state.rows("SELECT count(*) FROM write_safety_claims")[0][0]), priorCharges + (step.action == "create" ? 0 : 1))
+        XCTAssertEqual(try state.auditRecords().filter { $0["event"] == .string("write_not_applied") }.count, 1)
+        probe.mode = "success"; probe.returned = false
+        let retry = call(broker, step.tool, ["preview": try step.draft()])
+        XCTAssertEqual(retry["result"]["state"], .string("applied"), family)
+        XCTAssertEqual(probe.calls, priorCalls + 1)
+        let events = call(broker, "query_events", ["start": .string("2026-11-02T00:00:00Z"), "end": .string("2026-11-03T00:00:00Z")])["result"]["events"].array!
+        let independent = try XCTUnwrap(events.first { $0["fields"]["title"] == .string("Independent fixture") })["id"]
+        let unrelated = try preview(broker, ["action": .string("modify"), "scope": .string("this"), "event_id": independent, "fields": .object(["notes": .string("Independent edit")])])
+        XCTAssertEqual(call(broker, "commit_modify", ["preview": unrelated])["result"]["state"], .string("applied"), family)
+        try state.verifyAudit()
     }
-    func testEveryWriteFamilyEnteredThrowUnclassifiedFailureAndTypedReadbackStayUnknown() throws {
-        for mode in ["entered", "untyped", "typed_readback", "after"] {
-            for family in families {
-                let (state, probe, broker) = try fixture(), step = try scenario(family, broker), review = try step.draft(), before = probe.calls
-                probe.mode = mode; probe.returned = false
-                let result = call(broker, step.tool, ["preview": review])
-                XCTAssertEqual(result["result"]["state"], .string("unknown"), family + ":" + mode)
-                XCTAssertTrue(try state.hasUnresolved()); XCTAssertEqual(call(broker, step.tool, ["preview": review]), result)
-                XCTAssertEqual(probe.calls, before + (mode == "untyped" ? 0 : 1))
-                XCTAssertTrue(try state.auditRecords().filter { $0["event"] == .string("write_not_applied") }.isEmpty)
-                if let source = review["envelope"]["rollback"]["source_change_ids"].array?.first {
-                    XCTAssertTrue(try state.recoveryHeldNonces().contains(source.string!))
-                    XCTAssertNotEqual(call(broker, "preflight_rollback", ["change_ids": .array([source])])["error"], .null)
-                }
-                let wire = try result.text(); XCTAssertFalse(wire.contains("PrivateFixture")); XCTAssertFalse(wire.contains("credential and event text"))
-            }
+
+    private func assertUnknown(_ family: String, mode: String) throws {
+        let (state, probe, broker) = try fixture(), step = try scenario(family, broker), review = try step.draft(), before = probe.calls
+        probe.mode = mode; probe.returned = false
+        let result = call(broker, step.tool, ["preview": review])
+        XCTAssertEqual(result["result"]["state"], .string("unknown"), family + ":" + mode)
+        XCTAssertTrue(try state.hasUnresolved()); XCTAssertEqual(call(broker, step.tool, ["preview": review]), result)
+        XCTAssertEqual(probe.calls, before + (mode == "untyped" ? 0 : 1))
+        XCTAssertTrue(try state.auditRecords().filter { $0["event"] == .string("write_not_applied") }.isEmpty)
+        if let source = review["envelope"]["rollback"]["source_change_ids"].array?.first {
+            XCTAssertTrue(try state.recoveryHeldNonces().contains(source.string!))
+            XCTAssertNotEqual(call(broker, "preflight_rollback", ["change_ids": .array([source])])["error"], .null)
         }
+        let wire = try result.text(); XCTAssertFalse(wire.contains("PrivateFixture")); XCTAssertFalse(wire.contains("credential and event text"))
     }
+
+    func testPreEntryCreate() throws { try assertPreEntry("create") }
+    func testPreEntrySeriesCreate() throws { try assertPreEntry("series_create") }
+    func testPreEntryModify() throws { try assertPreEntry("modify") }
+    func testPreEntryDelete() throws { try assertPreEntry("delete") }
+    func testPreEntryAlarmsInverse() throws { try assertPreEntry("alarms_inverse") }
+    func testPreEntryRestore() throws { try assertPreEntry("restore") }
+    func testPreEntrySeries() throws { try assertPreEntry("series") }
+    func testPreEntrySeriesInverse() throws { try assertPreEntry("series_inverse") }
+    func testPreEntryFuture() throws { try assertPreEntry("future") }
+    func testPreEntryFutureInverse() throws { try assertPreEntry("future_inverse") }
+    func testPreEntryTermination() throws { try assertPreEntry("termination") }
+    func testPreEntryFutureRestore() throws { try assertPreEntry("future_restore") }
+    func testPreEntryAllDayCreate() throws { try assertPreEntry("all_day_create") }
+    func testPreEntryAllDayModify() throws { try assertPreEntry("all_day_modify") }
+    func testPreEntryAllDayInverse() throws { try assertPreEntry("all_day_inverse") }
+    func testUnknownCreateEntered() throws { try assertUnknown("create", mode: "entered") }
+    func testUnknownSeriesCreateEntered() throws { try assertUnknown("series_create", mode: "entered") }
+    func testUnknownModifyEntered() throws { try assertUnknown("modify", mode: "entered") }
+    func testUnknownDeleteEntered() throws { try assertUnknown("delete", mode: "entered") }
+    func testUnknownAlarmsInverseEntered() throws { try assertUnknown("alarms_inverse", mode: "entered") }
+    func testUnknownRestoreEntered() throws { try assertUnknown("restore", mode: "entered") }
+    func testUnknownSeriesEntered() throws { try assertUnknown("series", mode: "entered") }
+    func testUnknownSeriesInverseEntered() throws { try assertUnknown("series_inverse", mode: "entered") }
+    func testUnknownFutureEntered() throws { try assertUnknown("future", mode: "entered") }
+    func testUnknownFutureInverseEntered() throws { try assertUnknown("future_inverse", mode: "entered") }
+    func testUnknownTerminationEntered() throws { try assertUnknown("termination", mode: "entered") }
+    func testUnknownFutureRestoreEntered() throws { try assertUnknown("future_restore", mode: "entered") }
+    func testUnknownAllDayCreateEntered() throws { try assertUnknown("all_day_create", mode: "entered") }
+    func testUnknownAllDayModifyEntered() throws { try assertUnknown("all_day_modify", mode: "entered") }
+    func testUnknownAllDayInverseEntered() throws { try assertUnknown("all_day_inverse", mode: "entered") }
+    func testUnknownCreateUntyped() throws { try assertUnknown("create", mode: "untyped") }
+    func testUnknownSeriesCreateUntyped() throws { try assertUnknown("series_create", mode: "untyped") }
+    func testUnknownModifyUntyped() throws { try assertUnknown("modify", mode: "untyped") }
+    func testUnknownDeleteUntyped() throws { try assertUnknown("delete", mode: "untyped") }
+    func testUnknownAlarmsInverseUntyped() throws { try assertUnknown("alarms_inverse", mode: "untyped") }
+    func testUnknownRestoreUntyped() throws { try assertUnknown("restore", mode: "untyped") }
+    func testUnknownSeriesUntyped() throws { try assertUnknown("series", mode: "untyped") }
+    func testUnknownSeriesInverseUntyped() throws { try assertUnknown("series_inverse", mode: "untyped") }
+    func testUnknownFutureUntyped() throws { try assertUnknown("future", mode: "untyped") }
+    func testUnknownFutureInverseUntyped() throws { try assertUnknown("future_inverse", mode: "untyped") }
+    func testUnknownTerminationUntyped() throws { try assertUnknown("termination", mode: "untyped") }
+    func testUnknownFutureRestoreUntyped() throws { try assertUnknown("future_restore", mode: "untyped") }
+    func testUnknownAllDayCreateUntyped() throws { try assertUnknown("all_day_create", mode: "untyped") }
+    func testUnknownAllDayModifyUntyped() throws { try assertUnknown("all_day_modify", mode: "untyped") }
+    func testUnknownAllDayInverseUntyped() throws { try assertUnknown("all_day_inverse", mode: "untyped") }
+    func testUnknownCreateTypedReadback() throws { try assertUnknown("create", mode: "typed_readback") }
+    func testUnknownSeriesCreateTypedReadback() throws { try assertUnknown("series_create", mode: "typed_readback") }
+    func testUnknownModifyTypedReadback() throws { try assertUnknown("modify", mode: "typed_readback") }
+    func testUnknownDeleteTypedReadback() throws { try assertUnknown("delete", mode: "typed_readback") }
+    func testUnknownAlarmsInverseTypedReadback() throws { try assertUnknown("alarms_inverse", mode: "typed_readback") }
+    func testUnknownRestoreTypedReadback() throws { try assertUnknown("restore", mode: "typed_readback") }
+    func testUnknownSeriesTypedReadback() throws { try assertUnknown("series", mode: "typed_readback") }
+    func testUnknownSeriesInverseTypedReadback() throws { try assertUnknown("series_inverse", mode: "typed_readback") }
+    func testUnknownFutureTypedReadback() throws { try assertUnknown("future", mode: "typed_readback") }
+    func testUnknownFutureInverseTypedReadback() throws { try assertUnknown("future_inverse", mode: "typed_readback") }
+    func testUnknownTerminationTypedReadback() throws { try assertUnknown("termination", mode: "typed_readback") }
+    func testUnknownFutureRestoreTypedReadback() throws { try assertUnknown("future_restore", mode: "typed_readback") }
+    func testUnknownAllDayCreateTypedReadback() throws { try assertUnknown("all_day_create", mode: "typed_readback") }
+    func testUnknownAllDayModifyTypedReadback() throws { try assertUnknown("all_day_modify", mode: "typed_readback") }
+    func testUnknownAllDayInverseTypedReadback() throws { try assertUnknown("all_day_inverse", mode: "typed_readback") }
+    func testUnknownCreateAfter() throws { try assertUnknown("create", mode: "after") }
+    func testUnknownSeriesCreateAfter() throws { try assertUnknown("series_create", mode: "after") }
+    func testUnknownModifyAfter() throws { try assertUnknown("modify", mode: "after") }
+    func testUnknownDeleteAfter() throws { try assertUnknown("delete", mode: "after") }
+    func testUnknownAlarmsInverseAfter() throws { try assertUnknown("alarms_inverse", mode: "after") }
+    func testUnknownRestoreAfter() throws { try assertUnknown("restore", mode: "after") }
+    func testUnknownSeriesAfter() throws { try assertUnknown("series", mode: "after") }
+    func testUnknownSeriesInverseAfter() throws { try assertUnknown("series_inverse", mode: "after") }
+    func testUnknownFutureAfter() throws { try assertUnknown("future", mode: "after") }
+    func testUnknownFutureInverseAfter() throws { try assertUnknown("future_inverse", mode: "after") }
+    func testUnknownTerminationAfter() throws { try assertUnknown("termination", mode: "after") }
+    func testUnknownFutureRestoreAfter() throws { try assertUnknown("future_restore", mode: "after") }
+    func testUnknownAllDayCreateAfter() throws { try assertUnknown("all_day_create", mode: "after") }
+    func testUnknownAllDayModifyAfter() throws { try assertUnknown("all_day_modify", mode: "after") }
+    func testUnknownAllDayInverseAfter() throws { try assertUnknown("all_day_inverse", mode: "after") }
+
     func testLeafAttemptCannotClaimNonEntryAfterEntryOrNormalReturnAndUnknownErrorsStayPrivate() throws {
         var calls = 0
         do { _ = try ProviderMutationAttempt.run { _ in 1 }; XCTFail("Normal return without mutation must fail") }
@@ -222,14 +293,17 @@ final class NotAppliedTests: XCTestCase {
         XCTAssertTrue(try state.isProvenNotApplied(state.recoveryRows()[0]))
     }
     private func rewriteAudit(_ state: StateStore, edit: (inout [String: JSON]) -> Void) throws {
-        try state.execute("DROP TRIGGER audit_no_update")
-        var previous = String(repeating: "0", count: 64)
-        for row in try state.rows("SELECT sequence,body FROM audit ORDER BY sequence") {
-            var body = try JSON.parse(Data(row[1].utf8)).object!
-            if body["event"] == .string("write_not_applied") { edit(&body) }
-            let text = try JSON.object(body).text(), hash = digest(Data((previous + text).utf8))
-            try state.execute("UPDATE audit SET body=?,previous_hash=?,hash=? WHERE sequence=?", [text, previous, hash, row[0]])
-            previous = hash
+        // Startup checks observe the completed tampered fixture, never an intermediate rewrite.
+        try state.transaction {
+            try state.execute("DROP TRIGGER audit_no_update")
+            var previous = String(repeating: "0", count: 64)
+            for row in try state.rows("SELECT sequence,body FROM audit ORDER BY sequence") {
+                var body = try JSON.parse(Data(row[1].utf8)).object!
+                if body["event"] == .string("write_not_applied") { edit(&body) }
+                let text = try JSON.object(body).text(), hash = digest(Data((previous + text).utf8))
+                try state.execute("UPDATE audit SET body=?,previous_hash=?,hash=? WHERE sequence=?", [text, previous, hash, row[0]])
+                previous = hash
+            }
         }
     }
     func testStartupRejectsMalformedOrUnmatchedNativeProofBeforeExpiry() throws {

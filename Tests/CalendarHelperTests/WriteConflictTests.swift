@@ -243,12 +243,15 @@ final class WriteConflictTests: XCTestCase {
             var candidate = try payload(state, group: deep ? "ordinary" : String(repeating: "x", count: 270_000)).object!
             if deep {
                 var source: String?
-                for _ in 0..<130 {
-                    let nonce = UUID().uuidString
-                    var marker: [String: JSON] = ["storage_version": .int(2), "action": .string("modify"), "payload_digest": .string(String(repeating: "a", count: 64)), "calendar_id": candidate["calendar"]!["id"]]
-                    if let source { marker["rollback_of"] = .array([.string(source)]) }
-                    try state.execute("INSERT INTO executions VALUES(?,?,'applied',?,?)", [nonce, try JSON.object(marker).text(), try JSON.object(["storage_version": .int(2)]).text(), iso(Date())])
-                    source = nonce
+                // Construct only the synthetic dependency fixture in one transaction.
+                try state.transaction {
+                    for _ in 0..<130 {
+                        let nonce = UUID().uuidString
+                        var marker: [String: JSON] = ["storage_version": .int(2), "action": .string("modify"), "payload_digest": .string(String(repeating: "a", count: 64)), "calendar_id": candidate["calendar"]!["id"]]
+                        if let source { marker["rollback_of"] = .array([.string(source)]) }
+                        try state.execute("INSERT INTO executions VALUES(?,?,'applied',?,?)", [nonce, try JSON.object(marker).text(), try JSON.object(["storage_version": .int(2)]).text(), iso(Date())])
+                        source = nonce
+                    }
                 }
                 candidate["rollback"] = .object(["source_change_ids": .array([.string(source!)])])
             }
