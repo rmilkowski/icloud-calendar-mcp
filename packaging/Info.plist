@@ -10,4 +10,5 @@
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSCalendarsFullAccessUsageDescription</key><string>Read your configured calendars and apply exact changes through ChatGPT native tool confirmation and the Calendar MCP execution journal.</string>
+<key>NSRemindersFullAccessUsageDescription</key><string>Read your selected reminder lists and apply exact nonrecurring reminder changes through ChatGPT native tool confirmation and the separate Reminders execution journal.</string>
 </dict></plist>

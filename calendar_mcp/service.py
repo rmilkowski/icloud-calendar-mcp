@@ -110,7 +110,8 @@ def load_config(state):
     config = json.loads(_read(directory / "config.json"))
     keys = {"version", "repo", "python", "helper", "state", "port", "backend", "tunnel_client",
             "tunnel_id", "tunnel_env", "profile_dir", "alias", "profile", "notify"}
-    if not isinstance(config, dict) or set(config) != keys or config["version"] != 1:
+    if (not isinstance(config, dict) or set(config) - {"enable_reminders"} != keys or config["version"] != 1
+            or ("enable_reminders" in config and type(config["enable_reminders"]) is not bool)):
         raise ValueError("Invalid service config")
     if (type(config["port"]) is not int or not 1 <= config["port"] <= 65535
             or config["backend"] != "eventkit" or type(config["notify"]) is not bool):
@@ -205,6 +206,8 @@ def plists(config):
     gateway = dict(common, Label=GATEWAY, ProgramArguments=base + ["serve", "--helper", config["helper"],
         "--backend", "eventkit", "--state-dir", config["state"], "--port", str(config["port"])],
         StandardOutPath=str(directory / "gateway-launch.log"), StandardErrorPath=str(directory / "gateway-launch.log"))
+    if config.get("enable_reminders", False):
+        gateway["ProgramArguments"].append("--enable-reminders")
     monitor = dict(common, Label=MONITOR, ProgramArguments=base + ["service", "_monitor", "--state-dir", config["state"]],
         StartInterval=60, StandardOutPath=str(directory / "monitor-launch.log"),
         StandardErrorPath=str(directory / "monitor-launch.log"))
@@ -222,6 +225,8 @@ def render(args):
               "tunnel_client": _absolute(args.tunnel_client, True), "tunnel_id": args.tunnel_id,
               "tunnel_env": str(args.tunnel_env.expanduser().absolute()), "profile_dir": _absolute(args.profile_dir),
               "alias": args.alias, "profile": args.profile, "notify": not args.no_notify}
+    if getattr(args, "enable_reminders", False):
+        config["enable_reminders"] = True
     bundle_for_helper(config["helper"])
     _json_write(directory / "config.json", config)
     config = load_config(args.state_dir)
@@ -621,6 +626,7 @@ def add_parser(sub):
             item.add_argument("--profile", default="calendar-studio")
             item.add_argument("--port", type=int, default=18765)
             item.add_argument("--no-notify", action="store_true")
+            item.add_argument("--enable-reminders", action="store_true", help="Opt in to Reminders for the rendered gateway; no OS permission request")
 
 
 def dispatch(args):

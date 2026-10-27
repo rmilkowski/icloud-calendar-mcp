@@ -54,6 +54,14 @@ RECONCILIATION_CAPABILITIES = {
     "outcomes": ["applied", "not_applied"], "max_evidence_length": 2000,
     "commit_tools": ["commit_reconciliation"]}
 
+REMINDERS_CAPABILITIES = {"version": 1, "storage_version": 1, "preview_version": 1,
+    "nonrecurring": True, "recovery": True, "reconciliation": True, "max_selection": 1}
+
+
+def valid_reminders_capabilities(value):
+    return (isinstance(value, dict) and value == REMINDERS_CAPABILITIES
+            and all(type(value[key]) is type(expected) for key, expected in REMINDERS_CAPABILITIES.items()))
+
 
 def valid_reconciliation_capabilities(value):
     return (isinstance(value, dict) and value == RECONCILIATION_CAPABILITIES
@@ -103,14 +111,19 @@ class NativeError(Exception):
 
 
 class NativeBroker:
-    def __init__(self, helper, state, backend="synthetic", timeout=45, credential_binding=None, *, _launch_services=None):
+    def __init__(self, helper, state, backend="synthetic", timeout=45, credential_binding=None, *, _launch_services=None, enable_reminders=False):
+        if type(enable_reminders) is not bool:
+            raise ValueError("Reminders opt-in must be a boolean")
         helper = Path(helper).expanduser().resolve(strict=True)
         if not helper.is_file() or not os.access(helper, os.X_OK):
             raise ValueError("Native helper must be an executable file")
         self.timeout = timeout
         self.lock = threading.Lock()
         self.failed = False
+        self.reminders_enabled = enable_reminders
         command = [str(helper), "--serve", "--state-dir", str(state), "--backend", backend]
+        if enable_reminders:
+            command.append("--enable-reminders")
         if credential_binding is not None:
             command.extend(["--credential-binding", credential_binding])
         # The private test override may exercise LaunchServices with synthetic
@@ -146,7 +159,15 @@ class NativeBroker:
         self.process.stdout.close()
 
     def authorization_status(self):
-        result = self.call("authorization_status", {})
+        return self._authorization_status("authorization_status")
+
+    def reminders_authorization_status(self):
+        if getattr(self, "reminders_enabled", False) is not True:
+            raise NativeError("feature_unavailable", "Reminders extension is disabled; no authorization request submitted")
+        return self._authorization_status("reminders_authorization_status")
+
+    def _authorization_status(self, operation):
+        result = self.call(operation, {})
         if (set(result) != {"backend_mode", "authorization_status", "authorization_status_raw", "pid"}
                 or result["backend_mode"] not in ("eventkit", "synthetic")
                 or isinstance(result["pid"], bool) or not isinstance(result["pid"], int) or result["pid"] <= 1
@@ -268,6 +289,21 @@ class NativeBroker:
             if valid_reconciliation_capabilities(result):
                 self._reconciliation_capabilities = result
         return self._reconciliation_capabilities
+
+    def reminders_capabilities(self):
+        """Opt-in metadata only; disabled gateways never probe Reminders."""
+        if getattr(self, "reminders_enabled", False) is not True:
+            return None
+        if not getattr(self, "_reminders_capabilities_checked", False):
+            self._reminders_capabilities_checked = True
+            self._reminders_capabilities = None
+            try:
+                result = self.call("reminders_capabilities", {})
+            except (NativeError, ValueError, OSError):
+                return None
+            if valid_reminders_capabilities(result):
+                self._reminders_capabilities = result
+        return self._reminders_capabilities
 
     def _wait_io(self, readers, writers, deadline):
         while True:

@@ -112,3 +112,7 @@ Then run:
 ```
 
 Do not run manual and service owners together. GUI login is required after reboot; the monitor does not supply pre-login access or request Calendar permission.
+
+## 7. Optional Reminders
+
+Reminders is disabled by default and needs its own explicit activation and OS permission for a future settled app; Calendar access does not grant it. Use the same MCP/tunnel connection, then refresh host definitions for the additional tools. See [Reminders setup and limits](reminders.md), including the source-only validation status. This quick-install page does not authorize rebuilding an existing installed app or requesting permission unattended.

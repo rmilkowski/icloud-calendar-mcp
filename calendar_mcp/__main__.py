@@ -13,7 +13,7 @@ from .native import NativeBroker, NativeError
 from .protocol import Protocol
 from .security import DEFAULT_STATE, initialize, private_directory
 from .server import GatewayServer
-from . import changes, service
+from . import changes, reminders, service
 
 
 def main(argv=None):
@@ -21,6 +21,7 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     service.add_parser(sub)
     changes.add_parser(sub)
+    reminders.add_parser(sub)
     for command in ("init", "serve", "stdio", "status"):
         item = sub.add_parser(command)
         item.add_argument("--state-dir", type=Path, default=DEFAULT_STATE)
@@ -29,6 +30,7 @@ def main(argv=None):
         if command == "serve":
             item.add_argument("--helper", type=Path, required=True)
             item.add_argument("--backend", choices=("eventkit", "synthetic"), default="synthetic")
+            item.add_argument("--enable-reminders", action="store_true", help="Explicitly enable the optional Reminders extension; never requests OS access")
     args = parser.parse_args(argv)
     os.umask(0o077)
     try:
@@ -36,6 +38,8 @@ def main(argv=None):
             return service.dispatch(args)
         elif args.command == "changes":
             return changes.dispatch(args)
+        elif args.command == "reminders":
+            return reminders.dispatch(args)
         elif args.command == "init":
             initialize(args.state_dir)
             print("Private local credential ready; contents were not displayed.")
@@ -56,7 +60,8 @@ def main(argv=None):
             # Separate native state, private credential cannot be confused with signing state.
             native_state = private_directory(state / ("native-" + args.backend))
             broker = NativeBroker(args.helper, native_state, args.backend,
-                                  credential_binding=hashlib.sha256(token.encode("ascii")).hexdigest())
+                                  credential_binding=hashlib.sha256(token.encode("ascii")).hexdigest(),
+                                  enable_reminders=args.enable_reminders)
             try:
                 with GatewayServer(args.port, token, Protocol(broker), state_directory=state) as server:
                     def stop(signum, frame):

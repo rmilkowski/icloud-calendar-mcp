@@ -32,7 +32,22 @@ func runtimeStatus(_ mode: String) throws -> JSON {
     }
 }
 
-func runNativeInput(broker: Broker, mode: String) throws {
+func reminderRuntimeStatus(_ mode: String) throws -> JSON {
+    try nativeRuntimeStatus(backendMode: mode, pid: Int(getpid())) {
+        let status = EKEventStore.authorizationStatus(for: .reminder)
+        let name: String
+        switch status {
+        case .notDetermined: name = "not_determined"
+        case .restricted: name = "restricted"
+        case .denied: name = "denied"
+        case .fullAccess: name = "full_access"
+        case .writeOnly: name = "write_only"
+        @unknown default: name = "unknown"
+        }
+        return (name, status.rawValue)
+    }
+}
+func runNativeInput(broker: Broker, mode: String, reminders: ReminderBroker?) throws {
         var buffer = Data()
         var bytes = [UInt8](repeating: 0, count: 16_384)
         while true {
@@ -45,11 +60,19 @@ func runNativeInput(broker: Broker, mode: String) throws {
             while let newline = buffer.firstIndex(of: 10) {
                 let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
                 do {
+                    guard line.count <= 524_288 else { throw CoreError("request_too_large", "Native request exceeds 512 KiB") }
                     let request = try JSON.parse(line)
                     if request["op"].string == "authorization_status" {
                         let envelope = try Arguments(request, allowed: ["op", "arguments"], required: ["op", "arguments"])
                         _ = try Arguments(envelope.values["arguments"]!, allowed: [])
                         output(.object(["result": try runtimeStatus(mode)]))
+                    } else if request["op"].string == "reminders_authorization_status", reminders != nil {
+                        let envelope = try Arguments(request, allowed: ["op", "arguments"], required: ["op", "arguments"])
+                        _ = try Arguments(envelope.values["arguments"]!, allowed: [])
+                        output(.object(["result": try reminderRuntimeStatus(mode)]))
+                    } else if let op = request["op"].string, ReminderBroker.operations.contains(op) {
+                        if let reminders { output(reminders.handle(request)) }
+                        else { output(errorJSON(CoreError("feature_unavailable", "Reminders are disabled; explicitly configure --enable-reminders"))) }
                     } else { output(broker.handle(request)) }
                 } catch { output(errorJSON(error)) }
             }
@@ -82,7 +105,19 @@ do {
             }
             exit(1)
         }
+    } else if args == ["--authorize-reminders"] {
+        let store = EKEventStore()
+        do {
+            let allowed = try await store.requestFullAccessToReminders()
+            withExtendedLifetime(store) { output(.object(["result": .object(["full_access": .bool(allowed)])])) }
+        } catch {
+            withExtendedLifetime(store) { output(errorJSON(CoreError("reminders_authorization_failed", "Reminders authorization request failed; inspect this exact app's Reminders permission"))) }
+            exit(1)
+        }
     } else if args.first == "--serve" {
+        guard args.filter({ $0 == "--enable-reminders" }).count <= 1 else { throw CoreError("invalid_configuration", "Duplicate Reminders activation flag") }
+        let remindersEnabled = args.contains("--enable-reminders")
+        let args = args.filter { $0 != "--enable-reminders" }
         let allowed: Set<String> = ["--state-dir", "--backend", "--credential-binding", "--lifetime-fifo"]
         guard [7, 9].contains(args.count), stride(from: 1, to: args.count, by: 2).allSatisfy({ allowed.contains(args[$0]) }), Set(stride(from: 1, to: args.count, by: 2).map { args[$0] }).count == (args.count - 1) / 2,
               let statePath = flag("--state-dir", args), statePath.hasPrefix("/"),
@@ -97,6 +132,12 @@ do {
         try state.configure(backendMode: mode, credentialBinding: binding)
         let backend: any CalendarBackend = mode == "synthetic" ? SyntheticBackend() : EventKitBackend()
         let broker = Broker(state: state, backend: backend)
+        let reminders: ReminderBroker?
+        if remindersEnabled {
+            let reminderState = try ReminderStateStore(directory: state.directory.appendingPathComponent("reminders", isDirectory: true), backendMode: mode, credentialBinding: binding)
+            let reminderBackend: any ReminderBackend = mode == "synthetic" ? SyntheticReminderBackend() : EventKitReminderBackend()
+            reminders = ReminderBroker(state: reminderState, backend: reminderBackend)
+        } else { reminders = nil }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let recoveryWindow = LocalRecoveryWindow(broker: broker)
@@ -106,9 +147,9 @@ do {
         broker.setLocalRecoveryUIAvailable(recoverySocket != nil)
         let maintenance = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         maintenance.schedule(deadline: .now() + 60, repeating: 60)
-        maintenance.setEventHandler { _ = broker.maintainRecoveryDetails() }; maintenance.resume()
+        maintenance.setEventHandler { _ = broker.maintainRecoveryDetails(); reminders?.maintainDetails() }; maintenance.resume()
         DispatchQueue.global(qos: .userInitiated).async {
-            do { try runNativeInput(broker: broker, mode: mode); exit(0) }
+            do { try runNativeInput(broker: broker, mode: mode, reminders: reminders); exit(0) }
             catch { output(errorJSON(error)); exit(1) }
         }
         withExtendedLifetime((recoverySocket, maintenance, recoveryWindow)) { runNativeApplication() }
@@ -124,5 +165,5 @@ do {
         FileHandle.standardError.write(Data("Exceptional recovery only. Confirm external inspection by typing: reconcile \(nonce)\n".utf8))
         guard readLine() == "reconcile \(nonce)" else { throw CoreError("reconciliation_cancelled", "Reconciliation not confirmed") }
         output(.object(["result": try state.reconcile(nonce: nonce, outcome: outcome, evidence: evidence)]))
-    } else { throw CoreError("invalid_configuration", "Use --status, --authorize, --serve, --migrate-recovery, --rotate-keys or exceptional local --reconcile; no direct apply interface exists") }
+    } else { throw CoreError("invalid_configuration", "Use --status, --authorize, --authorize-reminders, --serve [--enable-reminders], --migrate-recovery, --rotate-keys or exceptional local --reconcile; no direct apply interface exists") }
 } catch { output(errorJSON(error)); exit(1) }

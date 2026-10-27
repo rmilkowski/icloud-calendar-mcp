@@ -128,6 +128,43 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(plists[service.MONITOR]["StartInterval"], 60)
         self.assertNotIn("AbandonProcessGroup", plists[service.MONITOR])
 
+    def test_reminders_service_opt_in_is_explicit_persistent_and_strict(self):
+        args = ["service", "render", "--state-dir", str(self.state), "--helper", self.config["helper"],
+                "--tunnel-client", "/usr/bin/true", "--tunnel-id", "synthetic-id", "--tunnel-env", str(self.env),
+                "--profile-dir", self.config["profile_dir"]]
+        with patch.object(service, "run", side_effect=AssertionError("No child allowed")), redirect_stdout(io.StringIO()):
+            self.assertEqual(main(args), 0)
+            legacy = service.load_config(self.state)
+            self.assertNotIn("enable_reminders", legacy)
+            original = service.plists(legacy)
+            self.assertNotIn("--enable-reminders", original[service.GATEWAY]["ProgramArguments"])
+            self.assertEqual(main([*args, "--enable-reminders"]), 0)
+        enabled = service.load_config(self.state)
+        self.assertIs(enabled["enable_reminders"], True)
+        enabled_plists = service.plists(enabled)
+        self.assertEqual(enabled_plists[service.GATEWAY]["ProgramArguments"],
+                         original[service.GATEWAY]["ProgramArguments"] + ["--enable-reminders"])
+        self.assertEqual(enabled_plists[service.MONITOR], original[service.MONITOR])
+        self.assertNotIn("--authorize-reminders", enabled_plists[service.GATEWAY]["ProgramArguments"])
+        for invalid in (None, 0, 1, "true", []):
+            service._json_write(self.directory / "config.json", {**enabled, "enable_reminders": invalid})
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                service.load_config(self.state)
+        service._json_write(self.directory / "config.json", {**enabled, "enable_reminders": False})
+        self.assertEqual(service.plists(service.load_config(self.state)), original)
+
+    def test_reminders_permission_does_not_change_calendar_monitor_health(self):
+        class Client:
+            def __init__(self, state, port):
+                pass
+
+            def status(self, timeout):
+                return {"gateway": "reachable", "native": {"backend_mode": "eventkit", "authorization_status": "full_access"},
+                        "reminders": {"authorization_status": "denied"}}
+
+        with patch("calendar_mcp.service.GatewayClient", Client):
+            self.assertEqual(service.System(self.config).gateway(), "healthy")
+
     def test_literal_loader_rejects_code_extra_keys_and_insecure_file(self):
         self.assertEqual(service.runtime_environment(self.env), {"CONTROL_PLANE_API_KEY": "synthetic-runtime-secret"})
         for raw in (b"CONTROL_PLANE_API_KEY=$(touch /tmp/should-not-exist)", b"CONTROL_PLANE_API_KEY=`id`",

@@ -250,7 +250,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 native = self.server.protocol.broker.authorization_status()
-                self.reply(200, {"gateway": "reachable", "native": native})
+                payload = {"gateway": "reachable", "native": native}
+                if getattr(self.server.protocol.broker, "reminders_enabled", False) is True:
+                    try:
+                        payload["reminders"] = self.server.protocol.broker.reminders_authorization_status()
+                    except NativeError as exc:
+                        payload["reminders"] = {"error": {"code": exc.code, "message": str(exc)}}
+                self.reply(200, payload)
             except NativeError as exc:
                 self.reply(503, {"gateway": "reachable", "native": {"error": {"code": exc.code, "message": str(exc)}}})
             return

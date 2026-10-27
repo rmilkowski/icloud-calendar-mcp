@@ -16,6 +16,7 @@ This document describes the current implementation and its safety boundaries. Fo
 | Journal assessment | Three journal-only tools record an explicit user assessment of an earlier unknown. They provide no provider verification or automatic retry. |
 | Optional service/UI | Per-user GUI-login gateway/monitor and native history window are implemented. Reboot/visible alerts and production UI Apply are not comprehensively verified. |
 | Attachments | Not implemented; supported provider-native access versus MCP-only associations remains a user choice. |
+| Optional Reminders | Implemented and synthetically validated in source, disabled by default and not deployed. Explicit opt-in plus an exact independent capability exposes seventeen separate tools; provider permission is separate. Native Reminders models/state/keys/history/quotas are isolated from Calendar. No installed rebuild, grant or deployment is part of this work. See [Reminders](reminders.md). |
 
 The installed app's Full Access and service health have been verified for its settled signature. Treat authorization and health as observations to recheck with metadata, not timeless guarantees or provider-write validation. Synthetic coverage is extensive; complete provider and host behavior remains unverified. See [validation limits](#validation-and-remaining-work).
 
@@ -54,6 +55,10 @@ flowchart TB
         B <--> D[(SQLite encrypted details keys identity journal quota and minimal audit)]
         B -->|Signed creation, occurrence, pattern or future change| E[EventKit]
         E <--> K[All calendars configured in macOS]
+        B -.->|Source extension only with explicit opt-in through shared native dispatcher| R[Native Reminders broker in same helper process]
+        R <--> RD[(Separate Reminders DB keys identity journal quota audit)]
+        R -->|Independent Reminders authorization and nonrecurring operations| RE[ReminderBackend]
+        RE --> RK[Configured Reminders lists]
     end
 ```
 
@@ -538,6 +543,22 @@ Some scoped user workflows have succeeded, but broader provider validation remai
 The optional history window has programmatic review-gate coverage; visual click-through and production Apply remain separate checks. Controlled service recovery is covered; actual GUI reboot/login and visible notification delivery remain unverified. A Calendar grant verified for one settled signature is not a guarantee across rebuilds.
 
 Synthetic testing is the default. Do not trigger TCC prompts or mutate real calendars during unattended tests. Once OS access and scoped real integration validation are authorized, normal scoped reads need no repeated confirmation. Actual writes require exact concrete consent through the selected host policy.
+
+## Optional Reminders extension
+
+The [Reminders contract and runbook](reminders.md) describe the source-only extension. Disabled startup performs no Reminders probe, state creation, access or prompt and preserves existing Calendar tools/status. Explicit opt-in persists through foreground/service configuration and gates the exact independent native capability. Enabled tools remain visible without a Reminders grant so journal history/assessment remain accessible; provider operations fail `reminders_access_required` until separately granted. Calendar monitor health remains independent.
+
+Its independently typed `reminders_capabilities({})` result is exactly:
+
+```json
+{"version":1,"storage_version":1,"preview_version":1,"nonrecurring":true,"recovery":true,"reconciliation":true,"max_selection":1}
+```
+
+Private `reminders_authorization_status({})` has the same four-field shape as Calendar metadata but consults only Reminders authorization; its output is separately named, never treated as Calendar permission. Explicit opt-in against an older helper may fail as unsupported configuration without automatic fallback/relaunch.
+
+The separate Reminders store uses domain `reminders`, storage contract 1 and its own DB/installation/signing identity, encrypted details, replay/assessment claims, audit and budgets. Calendar writer floor 7, encoding 2 and all existing authoritative history remain unchanged. Domain-separated signed ordinary/recovery and journal-assessment envelopes cannot cross resource/commit routes. Each write signs supported before/after state, mask, completion policy and fixed recovery limitations; raw inverse/copy restoration details are also host-visible. Five-day retained details, unresolved-source holds, immutable intent/nonces and bounded observation counters follow the independent reminder contract. Backups include the entire reminder subdirectory; Calendar-only key rotation is not a reminder-key rotation. No global cross-resource quota is claimed.
+
+Final source validation passed 374 strict native tests with zero failures/skips and the full 166-test Python suite (163 passed; three existing opt-in packaged lifecycle skips). Reminders actual-helper actions/recovery and closed synthetic unknown-assessment export/replay tests executed without a feature skip, alongside pure callback/witness tests. No installed app/OS access or deployment is changed. Snapshot/preview/wire limits and full 39-tool protected HTTP/stdio discovery are checked without relaxing Calendar contracts. See the runbook for exact date, absolute-alarm, one-source inverse and journal-assessment limitations; provider/host behavior remains unverified.
 
 ## Official sources
 
