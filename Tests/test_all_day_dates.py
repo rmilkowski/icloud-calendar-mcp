@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Civil all-day contracts use neutral fixtures and synthetic providers only."""
 from copy import deepcopy
 import hashlib

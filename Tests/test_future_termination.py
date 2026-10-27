@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Future termination and independent-tail-copy contracts use synthetic data only."""
 
 from copy import deepcopy

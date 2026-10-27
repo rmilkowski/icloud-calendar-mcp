@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Protected Darwin local endpoints and peer identity, independent of TMPDIR."""
 
 import ctypes

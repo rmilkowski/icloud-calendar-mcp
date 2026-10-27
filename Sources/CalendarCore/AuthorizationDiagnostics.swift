@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Robert Milkowski
+// SPDX-License-Identifier: AGPL-3.0-only
 import Foundation
 
 /// Explicit local --authorize diagnostics only. Never used for MCP responses or

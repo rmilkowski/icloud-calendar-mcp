@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Local credential file handling. Never return credential contents in diagnostics."""
 
 import os

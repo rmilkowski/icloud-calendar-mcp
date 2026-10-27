@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Local change-history reads and an open-only native review-window launcher."""
 
 import hashlib

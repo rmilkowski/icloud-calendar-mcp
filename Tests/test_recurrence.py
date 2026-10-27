@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Recurring contracts and native lifecycles use synthetic state exclusively."""
 
 from copy import deepcopy

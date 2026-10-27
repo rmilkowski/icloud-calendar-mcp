@@ -5,6 +5,7 @@
 <key>CFBundleName</key><string>Calendar MCP Helper</string>
 <key>CFBundleExecutable</key><string>CalendarHelper</string>
 <key>CFBundlePackageType</key><string>APPL</string>
+<key>NSHumanReadableCopyright</key><string>Copyright © 2026 Robert Milkowski. GNU AGPL version 3 only. See LICENSE in this app’s Resources. No warranty.</string>
 <key>CFBundleVersion</key><string>1</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>

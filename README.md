@@ -49,3 +49,11 @@ python3 -m unittest discover -s Tests -v
 ```
 
 The native runner uses eight workers and the full stress workload by default; `--mode routine` reduces only repetitive counter volume. Tests use synthetic providers and do not authorize Calendar access. Packaging replaces the local build bundle; use it only for a fresh or deliberately managed build. See [test and packaging options](docs/setup.md#2-build-sign-and-test-a-fresh-installation).
+
+## License and contributions
+
+Copyright © 2026 Robert Milkowski. Licensed under the **GNU Affero General Public License, version 3 only** (`AGPL-3.0-only`); see [LICENSE](LICENSE). This software comes without warranty, as described in the license.
+
+Distributing binaries or running a modified network version requires following the license’s applicable Corresponding Source terms; including the license text alone does not satisfy every distribution obligation.
+
+Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) for issues, forks, pull requests and development checks.

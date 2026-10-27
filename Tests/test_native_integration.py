@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Actual broker + HTTP + stdio integration, always synthetic and temporary."""
 
 import hashlib

@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 # Resolves the repository path safely, including spaces, without shell-evaluating input.
 set -eu
 calendar_repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)

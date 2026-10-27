@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Journal assessment schemas and transports use synthetic data only."""
 from copy import deepcopy
 import io

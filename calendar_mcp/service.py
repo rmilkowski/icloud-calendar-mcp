@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Opt-in Aqua launch agents and conservative, metadata-only recovery.
 
 No calendar operation is submitted here. Recovery restarts transports, never MCP

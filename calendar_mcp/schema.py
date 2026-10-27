@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Auditable JSON Schema subset, shared by tool publication and validation."""
 
 from copy import deepcopy

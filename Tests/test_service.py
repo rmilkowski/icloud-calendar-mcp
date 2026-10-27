@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Service tests use temporary state, fake launchctl/tunnel and synthetic HTTP."""
 
 from contextlib import redirect_stdout

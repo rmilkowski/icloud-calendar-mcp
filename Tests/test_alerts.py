@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Multiple-alert transport and actual-native tests use isolated synthetic state."""
 
 from copy import deepcopy

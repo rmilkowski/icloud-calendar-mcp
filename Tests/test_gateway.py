@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Protocol and boundary tests use no EventKit and request no OS permissions."""
 
 import contextlib

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Newline stdio MCP adapter for a fixed local gateway; no retry or redirect."""
 
 import http.client

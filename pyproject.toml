@@ -7,6 +7,7 @@ name = "private-calendar-mcp"
 version = "0.1.0"
 description = "Private loopback MCP gateway for the native Calendar broker"
 requires-python = ">=3.11"
+license = {file = "LICENSE"}
 dependencies = []
 
 [project.scripts]

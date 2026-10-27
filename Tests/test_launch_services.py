@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Explicit macOS LaunchServices lifecycle tests; synthetic data only.
 
 Run with CALENDAR_MCP_TEST_LAUNCH_SERVICES=1 after packaging the current app.

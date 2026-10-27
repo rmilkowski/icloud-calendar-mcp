@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Current-pattern field contracts use synthetic views and isolated transports."""
 
 from copy import deepcopy

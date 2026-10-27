@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Robert Milkowski
+# SPDX-License-Identifier: AGPL-3.0-only
 """Recovery transport contracts and local tooling use synthetic state only."""
 
 from contextlib import redirect_stderr, redirect_stdout
