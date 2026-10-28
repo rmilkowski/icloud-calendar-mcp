@@ -119,7 +119,7 @@ final class EventKitReminderBackend: ReminderBackend {
                 value.isCompleted = completed; value.completionDate = completionDate; chosen = completionDate
             case "set_on_commit":
                 guard action == "complete", completed, mask == ["completed"] else { throw CoreError("invalid_fields", "Completion policy requires completion action") }
-                chosen = try parseDate(iso(Date())); value.isCompleted = true; value.completionDate = chosen
+                chosen = ReminderCompletionTime.onCommit(now: Date()); value.isCompleted = true; value.completionDate = chosen
             default: throw CoreError("invalid_fields", "Unsupported completion timestamp policy")
             }
             try permission()

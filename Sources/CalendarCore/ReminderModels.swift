@@ -143,6 +143,7 @@ public protocol ReminderBackend: AnyObject {
 public final class SyntheticReminderBackend: ReminderBackend {
     public var listRecords: [ReminderListRecord], records: [ReminderRecord]
     public private(set) var writeCount = 0
+    var completionClock: () -> Date = Date.init
     public init(lists: [ReminderListRecord] = [ReminderListRecord(nativeID: "synthetic-reminders", title: "Synthetic reminders", source: "Synthetic")], reminders: [ReminderRecord] = []) { listRecords = lists; records = reminders }
     public func lists() throws -> [ReminderListRecord] { listRecords }
     public func query(listID: String) throws -> [ReminderRecord] { records.filter { $0.listNativeID == listID } }
@@ -153,7 +154,7 @@ public final class SyntheticReminderBackend: ReminderBackend {
         try ProviderMutationAttempt.run { attempt in
             guard listRecords.contains(where: { $0.nativeID == listID && $0.writable }) else { throw CoreError("read_only", "Reminder list is not writable") }
             if let existing { guard try get(nativeID: existing.nativeID, listID: listID) == existing else { throw CoreError("stale_event", "Reminder changed before provider entry") } }
-            let chosen = completionPolicy == "set_on_commit" ? try parseDate(iso(Date())) : completionDate
+            let chosen = completionPolicy == "set_on_commit" ? ReminderCompletionTime.onCommit(now: completionClock()) : completionDate
             return try attempt.mutate {
                 writeCount += 1
                 if action == "delete" { records.removeAll { $0.nativeID == existing?.nativeID && $0.listNativeID == listID }; return ReminderWriteResult(record: nil, completionDate: nil) }
