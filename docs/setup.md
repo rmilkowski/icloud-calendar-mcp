@@ -219,6 +219,8 @@ In [ChatGPT Plugins](https://chatgpt.com/plugins), choose plus → **Add custom 
 
 This is appropriate only for the intended trusted personal workspace/tunnel association. It does not provide per-user backend identity or multi-user authorization. Review the warning and create the plugin. If the tunnel is missing, check organization/workspace association and Read + Use access. No public listener, router forwarding or public OAuth implementation is included.
 
+Calendar tool descriptions state each action and its material limits; shared preview, host policy, uncertainty/replay and recovery guidance is in the capability-gated initialization instructions. Expanded commit arguments still contain the complete signed preview and limitations. The Calendar wording cleanup changes no schemas, annotations, native app, grants or Reminders metadata, and does not establish a host confirmation result or bypass a host warning/refusal.
+
 After server tool, schema or instruction changes, refresh and verify the private custom plugin before testing the changed capability:
 
 1. Check that the active ChatGPT workspace and selected plugin use the intended server/tunnel association.
