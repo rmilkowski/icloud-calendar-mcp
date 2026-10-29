@@ -493,6 +493,8 @@ In ChatGPT, use `list_changes` to browse retained modifications/deletions and `g
 
 For a recorded Calendar execution, its history `change_id` is the original execution preview’s `envelope.nonce`. Use that nonce directly with `get_stored_change`; no separately returned ID is needed. Rollback source `change_ids` use those same original execution nonces. An `event_id`, audit sequence or rollback `selection_id` is not a substitute. Preflight alone creates no stored execution.
 
+The backend metadata now explicitly describes this existing relationship. Refresh the intended host's tool definitions to load the clarification; backend verification does not establish the host's loaded wording or UI behavior.
+
 For selected changes, call `preflight_rollback` with unique `change_ids` (maximum 25) alone. For all matching changes within that bound, use `all: true` and optional history filters. A selection exceeding 25 sources or the complete preview-size bound fails with batching guidance; it never silently drops sources. For a larger **all** job:
 
 1. Collect every matching `list_changes` cursor page and freeze the complete newest-first ID inventory and total count.
