@@ -14,10 +14,40 @@ from calendar_mcp.native import (ALERTS_CAPABILITIES, RECOVERY_CAPABILITIES,
     ALL_DAY_DATES_CAPABILITIES, RECONCILIATION_CAPABILITIES, REMINDERS_CAPABILITIES)
 from calendar_mcp.protocol import BASE_INSTRUCTIONS, Protocol, REMINDER_INSTRUCTIONS, VERSIONS
 from calendar_mcp.reminders_schema import REMINDER_TOOLS
+from calendar_mcp import schema
 from calendar_mcp.schema import tools_for_capabilities
 
 BASELINE = json.loads((Path(__file__).parent / "fixtures/calendar_metadata_contracts.json").read_text())
 FLAGS = BASELINE["flags"]
+PREVIEW_ANNOTATIONS = json.loads((Path(__file__).parent / "fixtures/calendar_preview_descriptions.json").read_text())
+
+
+def schema_node(value, path):
+    """Look up a finite fixture path; never search arbitrary retained payloads."""
+    for part in path.split("/"):
+        if isinstance(value, list):
+            if not part.isdigit() or int(part) >= len(value):
+                return None
+            value = value[int(part)]
+        elif isinstance(value, dict) and part in value:
+            value = value[part]
+        else:
+            return None
+    return value
+
+
+def without_preview_annotations(tool):
+    """Remove ONLY reviewed new description paths with their exact fixed values."""
+    tool = deepcopy(tool)
+    for root in PREVIEW_ANNOTATIONS["preview_paths"].get(tool["name"], []):
+        for relative, expected in PREVIEW_ANNOTATIONS["annotations"].items():
+            parent, _, leaf = (root + "/" + relative).rpartition("/")
+            node = schema_node(tool, parent)
+            if isinstance(node, dict) and leaf in node:
+                if node[leaf] != expected:
+                    raise AssertionError("Unreviewed preview description at " + parent)
+                del node[leaf]
+    return tool
 
 
 def digest(value):
@@ -54,11 +84,81 @@ class CalendarMetadataTests(unittest.TestCase):
             key = "".join(str(int(value)) for value in bits)
             with self.subTest(capabilities=key):
                 tools = tools_for_capabilities(**dict(zip(FLAGS, bits)))
-                # Strip only the TOP-LEVEL description; every nested schema description,
-                # signed limitation, annotation and list ordering remains in the digest.
-                contract = [{name: value for name, value in tool.items() if name != "description"}
+                # Keep the old fixture hashes: only exact newly reviewed PATH+TEXT
+                # pairs and top-level tool wording may be excluded. Existing nested
+                # descriptions, signed limitations and every validation keyword stay.
+                contract = [{name: value for name, value in without_preview_annotations(tool).items() if name != "description"}
                             for tool in tools]
                 self.assertEqual(digest(contract), BASELINE["contracts"][key])
+                self.assertEqual(digest([[tool["name"], tool["description"]] for tool in tools]),
+                                 PREVIEW_ANNOTATIONS["tool_descriptions"][key])
+
+    def test_every_published_preview_version_explains_visible_envelope_tag_and_header(self):
+        versions, inverse_versions, seen = set(), set(), set()
+        for bits in itertools.product((False, True), repeat=len(FLAGS)):
+            for tool in tools_for_capabilities(**dict(zip(FLAGS, bits))):
+                for path in PREVIEW_ANNOTATIONS["preview_paths"].get(tool["name"], []):
+                    preview = schema_node(tool, path)
+                    if not isinstance(preview, dict) or "properties" not in preview:
+                        continue
+                    seen.add(tool["name"])
+                    self.assertEqual(preview["description"], PREVIEW_ANNOTATIONS["annotations"]["description"])
+                    self.assertEqual(preview["required"], ["envelope", "authentication_tag"])
+                    self.assertEqual(set(preview["properties"]), {"envelope", "authentication_tag"})
+                    self.assertFalse(preview["additionalProperties"])
+                    tag = preview["properties"]["authentication_tag"]
+                    self.assertEqual(tag["description"], schema.CALENDAR_TAG_DESCRIPTION)
+                    envelope = preview["properties"]["envelope"]
+                    self.assertEqual(envelope["description"], schema.CALENDAR_ENVELOPE_DESCRIPTION)
+                    for variant in envelope.get("oneOf", [envelope]):
+                        self.assertEqual(variant["description"], schema.CALENDAR_ENVELOPE_DESCRIPTION)
+                        fields = variant["properties"]
+                        for name, expected in schema.CALENDAR_HEADER_DESCRIPTIONS.items():
+                            self.assertEqual(fields[name]["description"], expected)
+                            self.assertIn(name, variant["required"])
+                        if tool["name"] != "commit_reconciliation":
+                            versions.update(fields["version"]["enum"])
+                            if "rollback" in fields:
+                                inverse_versions.update(fields["version"]["enum"])
+                            self.assertTrue({"before", "after", "calendar", "action", "scope"} <= fields.keys())
+                        else:
+                            source = fields["source"]["properties"]
+                            for name in ("payload", "result"):
+                                self.assertEqual(source[name], {"type": "object", "properties": {}, "required": [], "additionalProperties": True})
+        self.assertEqual(versions, set(range(1, 8)))
+        self.assertEqual(inverse_versions, {1, 2, 4, 5, 6, 7})
+        self.assertEqual(seen, set(PREVIEW_ANNOTATIONS["preview_paths"]))
+
+    def test_description_whitelist_cannot_hide_old_descriptions_or_validation_changes(self):
+        tools = tools_for_capabilities(**dict.fromkeys(FLAGS, True))
+        original = next(tool for tool in tools if tool["name"] == "commit_create")
+        baseline = without_preview_annotations(original)
+        changed = deepcopy(original)
+        changed["inputSchema"]["properties"]["preview"]["oneOf"][0]["description"] = "Unexpected replacement"
+        with self.assertRaises(AssertionError):
+            without_preview_annotations(changed)
+        for mutate in (
+            lambda item: item["inputSchema"]["properties"]["preview"]["oneOf"][0]["properties"]["envelope"]["properties"]["after"].update(description=schema.CALENDAR_ENVELOPE_DESCRIPTION),
+            lambda item: item["inputSchema"]["properties"]["preview"]["oneOf"][0]["properties"]["authentication_tag"].update(maxLength=257),
+            lambda item: item["inputSchema"]["properties"]["preview"]["oneOf"][1]["properties"]["envelope"]["oneOf"][0]["properties"]["after"]["properties"]["alerts"].update(description="Changed existing alert meaning")):
+            changed = deepcopy(original)
+            mutate(changed)
+            self.assertNotEqual(without_preview_annotations(changed), baseline)
+        assessment = next(tool for tool in tools if tool["name"] == "commit_reconciliation")
+        changed = deepcopy(assessment)
+        changed["inputSchema"]["properties"]["preview"]["properties"]["envelope"]["properties"]["source"]["properties"]["payload"]["description"] = schema.CALENDAR_ENVELOPE_DESCRIPTION
+        self.assertNotEqual(without_preview_annotations(changed), without_preview_annotations(assessment))
+
+    def test_authentication_explanation_keeps_sensitivity_local_secrets_and_exact_replay_distinct(self):
+        guidance = initialize(Protocol(MetadataBroker(7, **dict.fromkeys(FLAGS, True))))["instructions"]
+        self.assertTrue(guidance.startswith(BASE_INSTRUCTIONS))
+        self.assertEqual(len(BASE_INSTRUCTIONS), 437)
+        for text in ("base64 HMAC-SHA256", "entire visible", "not encryption or hidden instructions", "not API keys or approval",
+                     "fresh first execution", "exact recorded replay", "Signing secrets and gateway bearer tokens remain local",
+                     "sensitive scoped authorization material", "not a login credential"):
+            self.assertIn(text, guidance)
+        self.assertEqual(schema.IDENTITY, {"type": "string", "maxLength": 200, "minLength": 1})
+        self.assertEqual(schema.STAMP, {"type": "string", "maxLength": 64, "format": "date-time"})
 
     def test_actual_protocol_floor_and_feature_matrix_never_advertises_unavailable_routes(self):
         for floor in (None, 2, 3, 4, 5, 6, 7, 8, True, 6.0):
@@ -170,6 +270,7 @@ class CalendarMetadataTests(unittest.TestCase):
         self.assertEqual(digest(protocol.tools), BASELINE["reminder_tools"])
         self.assertEqual(initialize(protocol)["instructions"], REMINDER_INSTRUCTIONS)
         self.assertEqual(digest(initialize(protocol)["instructions"]), BASELINE["reminder_instructions"])
+        self.assertEqual(digest(initialize(protocol)), PREVIEW_ANNOTATIONS["reminder_initialize"])
 
 
 if __name__ == "__main__":

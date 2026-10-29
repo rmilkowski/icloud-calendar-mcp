@@ -21,6 +21,43 @@ def string(limit=1000, **extra):
 
 IDENTITY = string(200, minLength=1)
 STAMP = string(64, format="date-time")
+
+
+# Calendar-only annotations: never attach these to shared IDENTITY/STAMP leaves.
+CALENDAR_PREVIEW_DESCRIPTION = (
+    "Complete visible Calendar change or journal-assessment preview, bound by an integrity tag. "
+    "Sensitive scoped authorization material for its matching commit under normal host policy.")
+CALENDAR_ENVELOPE_DESCRIPTION = (
+    "Complete visible operation, target state and applicable recovery or assessment limits. "
+    "Authentication does not encrypt this JSON envelope or add hidden instructions.")
+CALENDAR_TAG_DESCRIPTION = (
+    "Base64 HMAC-SHA256 integrity/authenticity tag over the entire visible envelope, not encryption, hidden instructions or a login/API "
+    "credential. Its signing secret stays local.")
+CALENDAR_HEADER_DESCRIPTIONS = {
+    "nonce": "Opaque replay identifier for this preview; not an API key or proof of user approval.",
+    "issued_at": "Native issuance time used with expires_at to bound a fresh first execution.",
+    "expires_at": "Fresh first-execution deadline; exact authenticated replay of a recorded execution returns its stored outcome without another mutation.",
+    "installation_id": "Opaque local installation binding; not an API key or signing secret.",
+    "credential_generation": "Opaque gateway credential-generation binding; not the gateway bearer token or an API key.",
+    "key_id": "Opaque local signing-key generation identifier; not the signing secret or an API key."}
+
+
+def calendar_header():
+    return {name: {**deepcopy(STAMP if name in ("issued_at", "expires_at") else IDENTITY), "description": text}
+            for name, text in CALENDAR_HEADER_DESCRIPTIONS.items()}
+
+
+def calendar_preview(envelope):
+    # Only the outer envelope and its immediate v2 alternatives are annotated.
+    # Historical source payload/result interiors are retained visible JSON.
+    envelope = deepcopy(envelope)
+    for variant in (envelope, *envelope.get("oneOf", [])):
+        if "description" in variant:
+            raise ValueError("Calendar envelope description already present")
+        variant["description"] = CALENDAR_ENVELOPE_DESCRIPTION
+    return {**obj({"envelope": envelope,
+                   "authentication_tag": string(256, minLength=1, description=CALENDAR_TAG_DESCRIPTION)},
+                  ("envelope", "authentication_tag")), "description": CALENDAR_PREVIEW_DESCRIPTION}
 ZONE = {"type": ["string", "null"], "maxLength": 100, "format": "time-zone"}
 FIELDS = obj({"title": string(1000, minLength=1), "start": STAMP, "end": STAMP,
               "time_zone": ZONE, "all_day": {"type": "boolean"},
@@ -42,17 +79,14 @@ EVENT = obj({"id": IDENTITY, "calendar": CALENDAR,
              "details": {"type": "object", "properties": {}, "required": [], "additionalProperties": True}},
             ("id", "calendar", "occurrence", "fields", "recurring", "detached",
              "availability", "status", "has_attendees", "has_organizer", "fingerprint", "details"))
-ENVELOPE = obj({"version": {"type": "integer", "enum": [1]}, "nonce": IDENTITY,
-                "issued_at": STAMP, "expires_at": STAMP, "installation_id": IDENTITY,
-                "credential_generation": IDENTITY, "key_id": IDENTITY,
+ENVELOPE = obj({"version": {"type": "integer", "enum": [1]}, **calendar_header(),
                 "action": string(enum=["create", "modify", "delete"]),
                 "scope": string(enum=["this"]), "calendar": CALENDAR,
                 "before": {**EVENT, "type": ["object", "null"]},
                 "after": {**REVIEW_FIELDS, "type": ["object", "null"]}},
                ("version", "nonce", "issued_at", "expires_at", "installation_id",
                 "credential_generation", "key_id", "action", "scope", "calendar", "before", "after"))
-PREVIEW = obj({"envelope": ENVELOPE, "authentication_tag": string(256, minLength=1)},
-              ("envelope", "authentication_tag"))
+PREVIEW = calendar_preview(ENVELOPE)
 RANGE = obj({"start": STAMP, "end": STAMP,
              "calendar_ids": {"type": "array", "items": IDENTITY, "minItems": 1, "maxItems": 100},
              "time_zone": string(100, format="time-zone")}, ("start", "end"))
@@ -72,9 +106,7 @@ ROLLBACK_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
                      "action": string(enum=["create", "modify"]),
                      "after": FULL_FIELDS, "rollback": ROLLBACK},
                      "required": [*ENVELOPE["required"], "rollback"]}
-ROLLBACK_PREVIEW = obj({"envelope": ROLLBACK_ENVELOPE,
-                        "authentication_tag": string(256, minLength=1)},
-                       ("envelope", "authentication_tag"))
+ROLLBACK_PREVIEW = calendar_preview(ROLLBACK_ENVELOPE)
 
 ALERT = {"oneOf": [obj({"relative_minutes": {"type": "integer", "minimum": -525600,
                                             "maximum": 525600}}, ("relative_minutes",)),
@@ -92,8 +124,7 @@ ALERT_ENVELOPE = {"oneOf": [
      "after": {**ALERT_REVIEW_FIELDS, "required": [*ALERT_REVIEW_FIELDS["required"], "alerts"]}}},
     {**ALERT_ENVELOPE_BASE, "properties": {**ALERT_ENVELOPE_BASE["properties"],
      "action": string(enum=["modify", "delete"])}}]}
-ALERT_PREVIEW = obj({"envelope": ALERT_ENVELOPE, "authentication_tag": string(256, minLength=1)},
-                    ("envelope", "authentication_tag"))
+ALERT_PREVIEW = calendar_preview(ALERT_ENVELOPE)
 RAW_ALARMS = {"type": "array", "maxItems": 10000,
               "items": {"type": "object", "properties": {}, "required": [], "additionalProperties": True}}
 ALERT_ROLLBACK = {**ROLLBACK, "properties": {**ROLLBACK["properties"], "alarm_restoration": RAW_ALARMS},
@@ -101,9 +132,7 @@ ALERT_ROLLBACK = {**ROLLBACK, "properties": {**ROLLBACK["properties"], "alarm_re
 ALERT_ROLLBACK_ENVELOPE = {**ROLLBACK_ENVELOPE,
     "properties": {**ROLLBACK_ENVELOPE["properties"], "version": {"type": "integer", "enum": [2]},
                    "after": REVIEW_FIELDS, "rollback": ALERT_ROLLBACK}}
-ALERT_ROLLBACK_PREVIEW = obj({"envelope": ALERT_ROLLBACK_ENVELOPE,
-                             "authentication_tag": string(256, minLength=1)},
-                            ("envelope", "authentication_tag"))
+ALERT_ROLLBACK_PREVIEW = calendar_preview(ALERT_ROLLBACK_ENVELOPE)
 
 RECURRENCE_END = {"oneOf": [obj({"count": {"type": "integer", "minimum": 1, "maximum": 1000}}, ("count",)),
                              obj({"until": STAMP}, ("until",)), {"type": "null"}]}
@@ -131,8 +160,7 @@ RECURRENCE_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
     "version": {"type": "integer", "enum": [3]}, "scope": string(enum=["this", "series"]),
     "after": {**RECURRENCE_REVIEW_FIELDS, "type": ["object", "null"]},
     "recovery": RECOVERY_DISCLOSURE}, "required": [*ENVELOPE["required"], "recovery"]}
-RECURRENCE_PREVIEW = obj({"envelope": RECURRENCE_ENVELOPE,
-                          "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+RECURRENCE_PREVIEW = calendar_preview(RECURRENCE_ENVELOPE)
 
 SERIES_FIELD_NAMES = ("title", "notes", "location", "alerts")
 SERIES_REFERENCE = obj({"provider_scope": string(enum=["current_pattern_from_first_occurrence"]),
@@ -155,8 +183,7 @@ SERIES_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
     "scope": string(enum=["series"]), "before": EVENT, "after": SERIES_AFTER,
     "series": SERIES_REFERENCE, "recovery": SERIES_RECOVERY},
     "required": [*ENVELOPE["required"], "series", "recovery"]}
-SERIES_PREVIEW = obj({"envelope": SERIES_ENVELOPE, "authentication_tag": string(256, minLength=1)},
-                     ("envelope", "authentication_tag"))
+SERIES_PREVIEW = calendar_preview(SERIES_ENVELOPE)
 SERIES_ROLLBACK = {**ROLLBACK, "properties": {**ROLLBACK["properties"],
     "source_change_ids": {**CHANGE_IDS, "maxItems": 1}, "restoration": {"type": "null"},
     "alarm_restoration": {**RAW_ALARMS, "type": ["array", "null"]}, "limitations": SERIES_LIMITATION_SCHEMA},
@@ -164,8 +191,7 @@ SERIES_ROLLBACK = {**ROLLBACK, "properties": {**ROLLBACK["properties"],
 SERIES_ROLLBACK_ENVELOPE = {**SERIES_ENVELOPE, "properties": {**SERIES_ENVELOPE["properties"],
     "after": SNAPSHOT_FIELDS, "rollback": SERIES_ROLLBACK},
     "required": [*SERIES_ENVELOPE["required"], "rollback"]}
-SERIES_ROLLBACK_PREVIEW = obj({"envelope": SERIES_ROLLBACK_ENVELOPE,
-                              "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+SERIES_ROLLBACK_PREVIEW = calendar_preview(SERIES_ROLLBACK_ENVELOPE)
 
 FUTURE_LIMITATIONS = [
     "Applies changed default fields to the selected future occurrence and later occurrences in its current provider pattern. Earlier occurrence fields and times are outside the requested change; earlier split segments are not merged.",
@@ -185,15 +211,13 @@ FUTURE_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties"],
     "scope": string(enum=["future"]), "before": EVENT, "after": SERIES_AFTER,
     "future": FUTURE_REFERENCE, "recovery": FUTURE_RECOVERY},
     "required": [*ENVELOPE["required"], "future", "recovery"]}
-FUTURE_PREVIEW = obj({"envelope": FUTURE_ENVELOPE, "authentication_tag": string(256, minLength=1)},
-                     ("envelope", "authentication_tag"))
+FUTURE_PREVIEW = calendar_preview(FUTURE_ENVELOPE)
 FUTURE_ROLLBACK = {**SERIES_ROLLBACK, "properties": {**SERIES_ROLLBACK["properties"],
     "limitations": FUTURE_LIMITATION_SCHEMA}}
 FUTURE_ROLLBACK_ENVELOPE = {**FUTURE_ENVELOPE, "properties": {**FUTURE_ENVELOPE["properties"],
     "after": SNAPSHOT_FIELDS, "rollback": FUTURE_ROLLBACK},
     "required": [*FUTURE_ENVELOPE["required"], "rollback"]}
-FUTURE_ROLLBACK_PREVIEW = obj({"envelope": FUTURE_ROLLBACK_ENVELOPE,
-                              "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+FUTURE_ROLLBACK_PREVIEW = calendar_preview(FUTURE_ROLLBACK_ENVELOPE)
 
 FUTURE_CUTOFF = {"oneOf": [
     obj({"date": string(10, minLength=10, format="date"),
@@ -223,8 +247,7 @@ FUTURE_TERMINATION_ENVELOPE = {**ENVELOPE, "properties": {**ENVELOPE["properties
     "scope": string(enum=["future"]), "before": EVENT, "after": {"type": "null"},
     "future": FUTURE_TERMINATION_REFERENCE, "recovery": FUTURE_TERMINATION_RECOVERY},
     "required": [*ENVELOPE["required"], "future", "recovery"]}
-FUTURE_TERMINATION_PREVIEW = obj({"envelope": FUTURE_TERMINATION_ENVELOPE,
-    "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+FUTURE_TERMINATION_PREVIEW = calendar_preview(FUTURE_TERMINATION_ENVELOPE)
 FUTURE_RESTORE_FIELDS = {**SNAPSHOT_FIELDS,
     "properties": {**SNAPSHOT_FIELDS["properties"], "recurrence": CANONICAL_RECURRENCE},
     "required": [*SNAPSHOT_FIELDS["required"], "recurrence"]}
@@ -238,8 +261,7 @@ FUTURE_RESTORE_ENVELOPE = {**FUTURE_TERMINATION_ENVELOPE,
         "action": string(enum=["create"]), "before": {"type": "null"}, "after": FUTURE_RESTORE_FIELDS,
         "rollback": FUTURE_RESTORE_ROLLBACK},
     "required": [*FUTURE_TERMINATION_ENVELOPE["required"], "rollback"]}
-FUTURE_RESTORE_PREVIEW = obj({"envelope": FUTURE_RESTORE_ENVELOPE,
-    "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+FUTURE_RESTORE_PREVIEW = calendar_preview(FUTURE_RESTORE_ENVELOPE)
 
 
 def tool(name, description, schema, *, write=False, destructive=False):
@@ -402,8 +424,7 @@ ALL_DAY_ROLLBACK_ENVELOPE = {**ALL_DAY_ENVELOPE, "properties": {**ALL_DAY_ENVELO
     "after": {**SNAPSHOT_FIELDS, "properties": {**SNAPSHOT_FIELDS["properties"],
         "time_zone": {"type": "null"}, "all_day": {"type": "boolean", "enum": [True]}}},
     "rollback": ALL_DAY_ROLLBACK}, "required": [*ALL_DAY_ENVELOPE["required"], "rollback"]}
-ALL_DAY_PREVIEWS = {name: obj({"envelope": envelope, "authentication_tag": string(256, minLength=1)},
-                            ("envelope", "authentication_tag")) for name, envelope in (
+ALL_DAY_PREVIEWS = {name: calendar_preview(envelope) for name, envelope in (
     ("commit_create", ALL_DAY_CREATE_ENVELOPE), ("commit_modify", ALL_DAY_ENVELOPE),
     ("commit_rollback", ALL_DAY_ROLLBACK_ENVELOPE))}
 
@@ -422,15 +443,13 @@ RECONCILIATION_SOURCE = obj({"change_id": IDENTITY, "payload_digest": string(64,
     "result": RETAINED_JOURNAL_OBJECT}, ("change_id", "payload_digest", "result_digest", "payload", "result"))
 RECONCILIATION_ENVELOPE = obj({"version": {"type": "integer", "enum": [1]},
     "kind": string(enum=["journal_reconciliation"]), "action": string(enum=["reconcile"]),
-    "nonce": IDENTITY, "issued_at": STAMP, "expires_at": STAMP, "installation_id": IDENTITY,
-    "credential_generation": IDENTITY, "key_id": IDENTITY, "source": RECONCILIATION_SOURCE,
+    **calendar_header(), "source": RECONCILIATION_SOURCE,
     "assessment": RECONCILIATION_ASSESSMENT,
     "limitations": {"type": "array", "minItems": 3, "maxItems": 3, "uniqueItems": True,
                     "items": string(2000, enum=RECONCILIATION_LIMITATIONS)}},
     ("version", "kind", "action", "nonce", "issued_at", "expires_at", "installation_id",
      "credential_generation", "key_id", "source", "assessment", "limitations"))
-RECONCILIATION_PREVIEW = obj({"envelope": RECONCILIATION_ENVELOPE,
-                             "authentication_tag": string(256, minLength=1)}, ("envelope", "authentication_tag"))
+RECONCILIATION_PREVIEW = calendar_preview(RECONCILIATION_ENVELOPE)
 RECONCILIATION_TOOLS = [
     tool("list_unresolved_changes", 'List unknown integration journal outcomes, including creation and recovery. Resolved records may disappear during pagination. No Calendar access, provider verification or automatic recovery occurs.',
          obj({"limit": {"type": "integer", "minimum": 1, "maximum": 100}, "cursor": string(4096, minLength=1)})),
