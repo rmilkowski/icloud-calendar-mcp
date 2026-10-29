@@ -119,7 +119,8 @@ class ReconciliationTests(unittest.TestCase):
                 initialized = protocol.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
                     "protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {}}})["result"]["instructions"]
                 self.assertIn("commit_reconciliation", initialized); self.assertNotIn("require evidence-based local reconciliation", initialized)
-                self.assertIn("original source change_id", initialized); self.assertIn("reconciliation nonce is not a Calendar execution nonce", initialized)
+                self.assertIn("get_change_status.nonce and get_stored_change.change_id use the original source execution-preview nonce", initialized)
+                self.assertIn("nonce is a separate receipt identifier, not a Calendar execution nonce", initialized)
             finally:
                 server.shutdown(); server.server_close(); thread.join()
 

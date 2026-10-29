@@ -312,7 +312,7 @@ TOOLS = [
          obj({**CHANGE_FILTERS, "include_expired": {"type": "boolean"},
               "limit": {"type": "integer", "minimum": 1, "maximum": 100},
               "cursor": string(4096, minLength=1)})),
-    tool("get_stored_change", "Read one integration change's retained before/proposed/observed snapshots and provisional recovery eligibility. Expired details cannot be restored. No Calendar access, provider verification, retry or reconciliation occurs.",
+    tool("get_stored_change", "Read one integration change's retained before/proposed/observed snapshots and provisional recovery eligibility. For a recorded execution, change_id is its original execution-preview nonce; use it directly without a separately returned ID. Expired details cannot be restored. No Calendar access, provider verification, retry or reconciliation occurs.",
          obj({"change_id": IDENTITY}, ("change_id",))),
     tool("preflight_rollback", "Prepare recovery for up to 25 verified applied retained sources, or all matching sources within that limit; oversized selections fail without truncation. Related edits are grouped into separate, non-atomic steps. Copies have new identities; recovery cannot reconstruct provider provenance.",
          obj({"change_ids": CHANGE_IDS, "all": {"type": "boolean"}, **CHANGE_FILTERS})),

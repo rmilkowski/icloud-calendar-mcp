@@ -20,6 +20,13 @@ from calendar_mcp.schema import tools_for_capabilities
 BASELINE = json.loads((Path(__file__).parent / "fixtures/calendar_metadata_contracts.json").read_text())
 FLAGS = BASELINE["flags"]
 PREVIEW_ANNOTATIONS = json.loads((Path(__file__).parent / "fixtures/calendar_preview_descriptions.json").read_text())
+PRIOR_STORED_CHANGE_DESCRIPTION = (
+    "Read one integration change's retained before/proposed/observed snapshots and provisional recovery eligibility. "
+    "Expired details cannot be restored. No Calendar access, provider verification, retry or reconciliation occurs.")
+STORED_CHANGE_DESCRIPTION = (
+    "Read one integration change's retained before/proposed/observed snapshots and provisional recovery eligibility. "
+    "For a recorded execution, change_id is its original execution-preview nonce; use it directly without a separately returned ID. "
+    "Expired details cannot be restored. No Calendar access, provider verification, retry or reconciliation occurs.")
 
 
 def schema_node(value, path):
@@ -90,7 +97,16 @@ class CalendarMetadataTests(unittest.TestCase):
                 contract = [{name: value for name, value in without_preview_annotations(tool).items() if name != "description"}
                             for tool in tools]
                 self.assertEqual(digest(contract), BASELINE["contracts"][key])
-                self.assertEqual(digest([[tool["name"], tool["description"]] for tool in tools]),
+                # The old fixture remains exact: only this deliberately reviewed
+                # get_stored_change sentence may differ from its prior wording.
+                descriptions = []
+                for tool in tools:
+                    description = tool["description"]
+                    if tool["name"] == "get_stored_change":
+                        self.assertEqual(description, STORED_CHANGE_DESCRIPTION)
+                        description = PRIOR_STORED_CHANGE_DESCRIPTION
+                    descriptions.append([tool["name"], description])
+                self.assertEqual(digest(descriptions),
                                  PREVIEW_ANNOTATIONS["tool_descriptions"][key])
 
     def test_every_published_preview_version_explains_visible_envelope_tag_and_header(self):
@@ -160,6 +176,30 @@ class CalendarMetadataTests(unittest.TestCase):
         self.assertEqual(schema.IDENTITY, {"type": "string", "maxLength": 200, "minLength": 1})
         self.assertEqual(schema.STAMP, {"type": "string", "maxLength": 64, "format": "date-time"})
 
+    def test_recorded_history_ids_are_original_execution_nonces_with_separate_assessment_receipts(self):
+        for floor in (None, 2, 7):
+            protocol = Protocol(MetadataBroker(floor, **dict.fromkeys(FLAGS, True)))
+            guidance = initialize(protocol)["instructions"]
+            if floor is None:
+                self.assertNotIn("Rollback source change_ids", guidance)
+                self.assertNotIn("get_stored_change", protocol.tool_names)
+                continue
+            tool = next(tool for tool in protocol.tools if tool["name"] == "get_stored_change")
+            self.assertEqual(tool["description"], STORED_CHANGE_DESCRIPTION)
+            self.assertEqual(tool["inputSchema"], {"type": "object", "properties": {"change_id": schema.IDENTITY},
+                                                  "required": ["change_id"], "additionalProperties": False})
+            for text in ("For a recorded Calendar execution", "change_id is its original execution-preview nonce",
+                         "no separate returned ID needed", "Rollback source change_ids contain those original execution nonces",
+                         "Preflight alone creates no stored execution", "event_id, audit sequence and rollback selection_id are not substitutes"):
+                self.assertIn(text, guidance)
+            if floor == 7:
+                for text in ("get_change_status.nonce and get_stored_change.change_id use the original source execution-preview nonce",
+                             "nonce is a separate receipt identifier, not a Calendar execution nonce", "has no Calendar execution row"):
+                    self.assertIn(text, guidance)
+                self.assertIn("never retries or enables automatic recovery", guidance)
+            else:
+                self.assertNotIn("separate receipt identifier", guidance)
+
     def test_actual_protocol_floor_and_feature_matrix_never_advertises_unavailable_routes(self):
         for floor in (None, 2, 3, 4, 5, 6, 7, 8, True, 6.0):
             for bits in itertools.product((False, True), repeat=len(FLAGS)):
@@ -210,8 +250,8 @@ class CalendarMetadataTests(unittest.TestCase):
                          "does not authorize automatic retries", "no pending approval", "never inferred approval"):
                 self.assertIn(text, guidance)
         current = initialize(Protocol(MetadataBroker(7, **dict.fromkeys(FLAGS, True))))["instructions"]
-        for text in ("newest-first", "without truncation", "non-atomic", "five days", "original source change_id",
-                     "reconciliation nonce is not a Calendar execution nonce", "identical authenticated assessment preview",
+        for text in ("newest-first", "without truncation", "non-atomic", "five days", "original source execution-preview nonce",
+                     "nonce is a separate receipt identifier, not a Calendar execution nonce", "identical authenticated assessment preview",
                      "user-assessed reconciled/not_applied are not native non-entry proof", "never infer the assessment"):
             self.assertIn(text, current)
 

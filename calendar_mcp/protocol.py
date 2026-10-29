@@ -40,7 +40,10 @@ INSTRUCTIONS = (
     "capacity and commit rechecks policy. If safety is absent, cumulative protection is unconfirmed. A limit rejection is not an approval "
     "request: wait until retry_at or ask the local operator about protected policy.")
 RECOVERY_INSTRUCTIONS = (
-    " Browse integration history with list_changes/get_stored_change; it does not describe other Calendar clients. Details expire after five "
+    " Browse integration history with list_changes/get_stored_change; it does not describe other Calendar clients. For a recorded Calendar "
+    "execution, change_id is its original execution-preview nonce; use it directly, with no separate returned ID needed. Rollback source "
+    "change_ids contain those original execution nonces. Preflight alone creates no stored execution. event_id, audit sequence and rollback "
+    "selection_id are not substitutes. Details expire after five "
     "days by default under protected local configuration; nonce/outcome, quota and audit markers remain. Follow every next_cursor until null "
     "and freeze the complete newest-first matching ID inventory before a large recovery. preflight_rollback accepts at most 25 unique "
     "change_ids alone, or all:true with optional filters; an oversized all selection fails without truncation. Show blocked entries for the "
@@ -101,7 +104,8 @@ RECONCILIATION_INSTRUCTIONS = (
     "submit its exact preview through commit_reconciliation under normal host policy. This journal-only user assessment performs no Calendar "
     "access or provider verification, retains original unknown/nonce/quota protection, and never retries or enables automatic recovery. "
     "If assessment transport is uncertain, replay only the identical authenticated assessment preview for its durable receipt, including "
-    "after expiry. get_change_status uses the original source change_id; the reconciliation nonce is not a Calendar execution nonce. "
+    "after expiry. get_change_status.nonce and get_stored_change.change_id use the original source execution-preview nonce; the reconciliation "
+    "nonce is a separate receipt identifier, not a Calendar execution nonce, and has no Calendar execution row. "
     "Do not create a fresh assessment or retry Calendar data. If the backend supports these tools but the host omits them, refresh the calendar plugin tool definitions.")
 NATIVE_NON_EXECUTION_INSTRUCTIONS = (
     " Native not_applied is terminal only with exact execution_evidence {version:1,provider_mutation:not_entered} plus durable result/audit: "
